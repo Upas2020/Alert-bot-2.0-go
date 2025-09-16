@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/sirupsen/logrus"
@@ -24,6 +26,10 @@ type TelegramBot struct {
 	st         *alerts.Storage
 	monitorCtx context.Context
 	stopMon    context.CancelFunc
+
+	// Для отслеживания резких изменений цен
+	sharpChangeMu       sync.Mutex
+	lastSharpChangeTime map[string]time.Time // Время последнего алерта о резком изменении для каждого символа
 }
 
 // NewTelegramBot создает экземпляр бота.
@@ -39,7 +45,12 @@ func NewTelegramBot(cfg config.Config) (*TelegramBot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("alerts storage init: %w", err)
 	}
-	return &TelegramBot{api: api, cfg: cfg, st: st}, nil
+	return &TelegramBot{
+		api:                 api,
+		cfg:                 cfg,
+		st:                  st,
+		lastSharpChangeTime: make(map[string]time.Time),
+	}, nil
 }
 
 // Start запускает обработку апдейтов до завершения контекста.
@@ -98,7 +109,7 @@ func (b *TelegramBot) handleUpdate(ctx context.Context, upd tgbotapi.Update) {
 	case strings.HasPrefix(text, "/price"):
 		b.cmdPrice(ctx, chatID, text)
 	case text == "/start":
-		b.reply(chatID, "Ссылка на г")
+		b.reply(chatID, "Бот для отслеживания цен криптовалют")
 	default:
 		if text != "" {
 			b.reply(chatID, "Эхо: "+text)
@@ -146,7 +157,6 @@ func (b *TelegramBot) cmdAddAlert(ctx context.Context, chatID int64, text string
 			b.reply(chatID, "Ошибка создания алерта: "+err.Error())
 			return
 		}
-		// Используем форматированную цену
 		b.reply(chatID, fmt.Sprintf("Алерт создан (ID: %s)\n%s достигнет %s", alert.ID, symbol, prices.FormatPrice(value)))
 
 		// Перезапускаем мониторинг с новым символом
@@ -165,7 +175,6 @@ func (b *TelegramBot) cmdAddAlert(ctx context.Context, chatID int64, text string
 			b.reply(chatID, "Ошибка создания алерта: "+err.Error())
 			return
 		}
-		// Используем форматированную цену
 		b.reply(chatID, fmt.Sprintf("Алерт создан (ID: %s)\n%s изменится на %.2f%% от %s", alert.ID, symbol, value, prices.FormatPrice(price)))
 
 		// Перезапускаем мониторинг с новым символом
@@ -284,13 +293,12 @@ func (b *TelegramBot) cmdPriceAll(ctx context.Context, chatID int64) {
 			continue
 		}
 
-		// Форматируем изменения с эмодзи для визуальной индикации
+		// Форматируем изменения
 		change15m := formatChange(priceInfo.Change15m)
 		change1h := formatChange(priceInfo.Change1h)
 		change4h := formatChange(priceInfo.Change4h)
 		change24h := formatChange(priceInfo.Change24h)
 
-		// Используем форматированную цену
 		msg += fmt.Sprintf("%s: %s\n", symbol, prices.FormatPrice(priceInfo.CurrentPrice))
 		msg += fmt.Sprintf("15м: %s | 1ч: %s | 4ч: %s | 24ч: %s\n\n",
 			change15m, change1h, change4h, change24h)
@@ -328,7 +336,7 @@ func (b *TelegramBot) cmdPrice(ctx context.Context, chatID int64, text string) {
 	b.reply(chatID, msg)
 }
 
-// formatChange форматирует процентное изменение без эмодзи
+// formatChange форматирует процентное изменение
 func formatChange(change float64) string {
 	if change > 0 {
 		return fmt.Sprintf("+%.2f%%", change)
@@ -367,7 +375,6 @@ func (b *TelegramBot) checkAlerts(symbol string, currentPrice float64) {
 			// Проверяем попадание в диапазон с погрешностью
 			if math.Abs(currentPrice-alert.TargetPrice) <= tolerance {
 				triggered = true
-				// Используем форматированные цены
 				msg = fmt.Sprintf("АЛЕРТ! %s достиг %s (текущая: %s)", symbol, prices.FormatPrice(alert.TargetPrice), prices.FormatPrice(currentPrice))
 				logrus.WithField("alert_id", alert.ID).Info("price alert triggered")
 			}
@@ -391,7 +398,6 @@ func (b *TelegramBot) checkAlerts(symbol string, currentPrice float64) {
 				if alert.TargetPercent < 0 {
 					direction = "упал"
 				}
-				// Используем форматированные цены
 				msg = fmt.Sprintf("АЛЕРТ! %s %s на %.2f%% (от %s до %s)",
 					symbol, direction, math.Abs(changePct), prices.FormatPrice(alert.BasePrice), prices.FormatPrice(currentPrice))
 				logrus.WithFields(logrus.Fields{
@@ -421,6 +427,92 @@ func (b *TelegramBot) checkAlerts(symbol string, currentPrice float64) {
 	}
 }
 
+// checkSharpChange проверяет резкие изменения цены для символа
+func (b *TelegramBot) checkSharpChange(symbol string, currentPrice float64) {
+	// Получаем цену на указанный интервал назад
+	intervalAgo := time.Now().Add(-time.Duration(b.cfg.SharpChangeIntervalMin) * time.Minute)
+	oldPrice, err := b.fetchHistoricalPrice(symbol, intervalAgo)
+	if err != nil {
+		logrus.WithError(err).WithFields(logrus.Fields{
+			"symbol":   symbol,
+			"interval": fmt.Sprintf("%dm", b.cfg.SharpChangeIntervalMin),
+		}).Debug("failed to get historical price for sharp change check")
+		return
+	}
+
+	// Вычисляем процентное изменение
+	changePct := ((currentPrice - oldPrice) / oldPrice) * 100
+	absChangePct := math.Abs(changePct)
+
+	logrus.WithFields(logrus.Fields{
+		"symbol":        symbol,
+		"current_price": currentPrice,
+		"old_price":     oldPrice,
+		"change_pct":    changePct,
+		"threshold":     b.cfg.SharpChangePercent,
+		"interval_min":  b.cfg.SharpChangeIntervalMin,
+	}).Debug("checking sharp change")
+
+	// Проверяем, превышает ли изменение пороговое значение
+	if absChangePct >= b.cfg.SharpChangePercent {
+		// Проверяем, не отправляли ли мы уже алерт недавно для этого символа
+		b.sharpChangeMu.Lock()
+		lastAlertTime, exists := b.lastSharpChangeTime[symbol]
+		now := time.Now()
+
+		// Отправляем алерт не чаще чем раз в час для одного символа
+		if !exists || now.Sub(lastAlertTime) >= 15*time.Minute {
+			b.lastSharpChangeTime[symbol] = now
+			b.sharpChangeMu.Unlock()
+
+			// Формируем сообщение
+			direction := "вырос"
+			if changePct < 0 {
+				direction = "упал"
+			}
+
+			// Получаем всех пользователей с алертами на этот символ
+			symbolAlerts := b.st.GetBySymbol(symbol)
+
+			// Создаем map уникальных chat_id
+			alertedChats := make(map[int64]bool)
+			for _, alert := range symbolAlerts {
+				alertedChats[alert.ChatID] = true
+			}
+
+			// Отправляем уведомление каждому пользователю с алертами на этот символ
+			if len(alertedChats) > 0 {
+				msg := fmt.Sprintf("%s %s на %.2f%% за %dм (от %s до %s)",
+					symbol, direction, absChangePct, b.cfg.SharpChangeIntervalMin,
+					prices.FormatPrice(oldPrice), prices.FormatPrice(currentPrice))
+
+				for chatID := range alertedChats {
+					b.reply(chatID, msg)
+				}
+
+				logrus.WithFields(logrus.Fields{
+					"symbol":         symbol,
+					"change_pct":     changePct,
+					"interval_min":   b.cfg.SharpChangeIntervalMin,
+					"notified_chats": len(alertedChats),
+				}).Info("sharp change alert sent")
+			}
+		} else {
+			b.sharpChangeMu.Unlock()
+			logrus.WithFields(logrus.Fields{
+				"symbol":              symbol,
+				"change_pct":          changePct,
+				"last_alert_time_ago": now.Sub(lastAlertTime).String(),
+			}).Debug("sharp change detected but alert suppressed due to recent notification")
+		}
+	}
+}
+
+// fetchHistoricalPrice получает историческую цену для указанного времени
+func (b *TelegramBot) fetchHistoricalPrice(symbol string, timestamp time.Time) (float64, error) {
+	return prices.FetchHistoricalPrice(nil, symbol, timestamp)
+}
+
 // startMonitoring запускает мониторинг цен для алертов
 func (b *TelegramBot) startMonitoring(ctx context.Context) {
 	// Останавливаем предыдущий мониторинг если есть
@@ -433,17 +525,19 @@ func (b *TelegramBot) startMonitoring(ctx context.Context) {
 	logrus.WithField("symbols", symbols).Info("starting monitoring for alert symbols")
 
 	if len(symbols) > 0 {
-		// Используем улучшенный мониторинг с провайдером символов
-		mon := prices.NewPriceMonitorWithProvider(b.st, 0, 60) // используем storage как провайдер символов, проверяем каждые 60 секунд
+		// Используем мониторинг с провайдером символов, проверяем каждые 60 секунд
+		mon := prices.NewPriceMonitorWithProvider(b.st, 0, 60)
 		monCtx, cancel := context.WithCancel(ctx)
 		b.monitorCtx = monCtx
 		b.stopMon = cancel
 		go func() {
 			_ = mon.Run(monCtx, func(symbol string, oldPrice, newPrice, deltaPct float64) {
-				// Проверяем, есть ли еще алерты для этого символа
+				// Проверяем алерты пользователей
 				alertsForSymbol := b.st.GetBySymbol(symbol)
 				if len(alertsForSymbol) > 0 {
 					b.checkAlerts(symbol, newPrice)
+					// Также проверяем резкие изменения цены
+					b.checkSharpChange(symbol, newPrice)
 				} else {
 					logrus.WithField("symbol", symbol).Debug("no alerts for symbol, skipping check")
 				}

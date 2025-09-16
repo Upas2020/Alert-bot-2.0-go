@@ -42,11 +42,9 @@ func main() {
 	}
 
 	logrus.WithFields(logrus.Fields{
-		"log_level":         cfg.LogLevel,
-		"alert_symbols":     cfg.AlertSymbols,
-		"threshold_percent": cfg.ThresholdPercent,
-		"poll_interval_sec": cfg.PollIntervalSec,
-		"alert_chat_id":     cfg.AlertChatID,
+		"log_level":                 cfg.LogLevel,
+		"sharp_change_percent":      cfg.SharpChangePercent,
+		"sharp_change_interval_min": cfg.SharpChangeIntervalMin,
 	}).Info("config loaded")
 
 	bot, err := internalbot.NewTelegramBot(cfg)

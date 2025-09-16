@@ -96,30 +96,34 @@ func FetchPriceInfo(client *http.Client, symbol string) (*PriceInfo, error) {
 	now := time.Now()
 
 	// 15 минут назад
-	if price15m, err := fetchHistoricalPrice(client, symbol, now.Add(-15*time.Minute)); err == nil {
+	if price15m, err := FetchHistoricalPrice(client, symbol, now.Add(-15*time.Minute)); err == nil {
 		priceInfo.Change15m = calculateChangePercent(price15m, currentPrice)
 	}
 
 	// 1 час назад
-	if price1h, err := fetchHistoricalPrice(client, symbol, now.Add(-1*time.Hour)); err == nil {
+	if price1h, err := FetchHistoricalPrice(client, symbol, now.Add(-1*time.Hour)); err == nil {
 		priceInfo.Change1h = calculateChangePercent(price1h, currentPrice)
 	}
 
 	// 4 часа назад
-	if price4h, err := fetchHistoricalPrice(client, symbol, now.Add(-4*time.Hour)); err == nil {
+	if price4h, err := FetchHistoricalPrice(client, symbol, now.Add(-4*time.Hour)); err == nil {
 		priceInfo.Change4h = calculateChangePercent(price4h, currentPrice)
 	}
 
 	// 24 часа назад
-	if price24h, err := fetchHistoricalPrice(client, symbol, now.Add(-24*time.Hour)); err == nil {
+	if price24h, err := FetchHistoricalPrice(client, symbol, now.Add(-24*time.Hour)); err == nil {
 		priceInfo.Change24h = calculateChangePercent(price24h, currentPrice)
 	}
 
 	return priceInfo, nil
 }
 
-// fetchHistoricalPrice получает цену на определенный момент времени
-func fetchHistoricalPrice(client *http.Client, symbol string, timestamp time.Time) (float64, error) {
+// FetchHistoricalPrice получает цену на определенный момент времени (экспортируемая функция)
+func FetchHistoricalPrice(client *http.Client, symbol string, timestamp time.Time) (float64, error) {
+	if client == nil {
+		client = &http.Client{Timeout: 10 * time.Second}
+	}
+
 	// Используем 1-минутные свечи и берем одну свечу ближайшую к нужному времени
 	endTime := timestamp.UnixMilli()
 	startTime := timestamp.Add(-2 * time.Minute).UnixMilli() // Небольшой буфер
@@ -227,7 +231,7 @@ func fetchWithURL(client *http.Client, url, symbol string) (float64, error) {
 	wanted := strings.ToUpper(symbol)
 	for _, ticker := range response.Data {
 		if strings.ToUpper(ticker.Symbol) == wanted {
-			price, err := parseFloat(ticker.LastPr) // Используем lastPr вместо close
+			price, err := parseFloat(ticker.LastPr)
 			if err != nil {
 				return 0, fmt.Errorf("failed to parse lastPr price '%s': %w", ticker.LastPr, err)
 			}
@@ -287,9 +291,4 @@ func FormatPrice(price float64) string {
 	}
 
 	return formatted
-}
-
-// FormatPriceWithSymbol форматирует цену с символом для удобства
-func FormatPriceWithSymbol(symbol string, price float64) string {
-	return fmt.Sprintf("%s: %s", symbol, FormatPrice(price))
 }
