@@ -9,13 +9,12 @@ import (
 
 // Config содержит конфигурацию приложения, получаемую из окружения.
 type Config struct {
-	RapidChangePercent float64 // Порог для быстрого изменения цены
-	BotToken           string
-	AlertSymbols       []string
-	ThresholdPercent   float64
-	PollIntervalSec    int
-	AlertChatID        int64
-	LogLevel           string
+	BotToken         string
+	AlertSymbols     []string
+	ThresholdPercent float64
+	PollIntervalSec  int
+	AlertChatID      int64
+	LogLevel         string
 }
 
 // Load загружает конфигурацию из переменных окружения.

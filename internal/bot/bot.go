@@ -98,7 +98,7 @@ func (b *TelegramBot) handleUpdate(ctx context.Context, upd tgbotapi.Update) {
 	case strings.HasPrefix(text, "/price"):
 		b.cmdPrice(ctx, chatID, text)
 	case text == "/start":
-		b.reply(chatID, "Ссылка на гитхаб")
+		b.reply(chatID, "Ссылка на г")
 	default:
 		if text != "" {
 			b.reply(chatID, "Эхо: "+text)
