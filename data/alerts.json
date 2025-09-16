@@ -1,0 +1,37 @@
+[
+  {
+    "id": "9437ad29-2621-4991-a1d5-72cba5bbe751",
+    "chat_id": -4690228641,
+    "symbol": "ETHUSDT",
+    "target_price": 4009.92,
+    "created_at": "2025-09-16T03:35:54.0131278+04:00"
+  },
+  {
+    "id": "dd0efb6f-335a-46f9-bed3-8aef5317387a",
+    "chat_id": -4690228641,
+    "symbol": "ETHUSDT",
+    "target_price": 4020,
+    "created_at": "2025-09-16T04:44:53.5644617+04:00"
+  },
+  {
+    "id": "a723319d-637c-44f6-9d9b-b9c6d2c3f5d3",
+    "chat_id": -4690228641,
+    "symbol": "ETHUSDT",
+    "target_price": 4720,
+    "created_at": "2025-09-16T04:45:02.5446065+04:00"
+  },
+  {
+    "id": "0f7e1958-cb15-44c2-ba8f-b37ea37fa8f2",
+    "chat_id": -4690228641,
+    "symbol": "PUMPUSDT",
+    "target_price": 4720,
+    "created_at": "2025-09-16T04:45:46.4748102+04:00"
+  },
+  {
+    "id": "4541b1b7-3eb1-4ebc-9d4f-c14d31579fca",
+    "chat_id": -4690228641,
+    "symbol": "ETHUSDT",
+    "target_price": 5720,
+    "created_at": "2025-09-16T04:45:58.3614145+04:00"
+  }
+]

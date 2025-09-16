@@ -1,0 +1,22 @@
+# Go build
+bin/
+build/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# IDE/Editor
+.idea/
+.vscode/
+
+# Env
+.env
+
+# Dependencies cache
+vendor/
+
+
