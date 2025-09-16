@@ -96,24 +96,22 @@ func (b *TelegramBot) handleUpdate(ctx context.Context, upd tgbotapi.Update) {
 	switch {
 	case text == "/chatid":
 		b.reply(chatID, fmt.Sprintf("Chat ID: %d", chatID))
-	case strings.HasPrefix(text, "/addalert"):
+	case strings.HasPrefix(text, "/add"):
 		b.cmdAddAlert(ctx, chatID, text)
 	case text == "/alerts":
 		b.cmdListAlerts(chatID)
-	case strings.HasPrefix(text, "/delalert"):
+	case strings.HasPrefix(text, "/del"):
 		b.cmdDelAlert(chatID, text)
 	case text == "/delallalerts":
 		b.cmdDelAllAlerts(chatID)
-	case text == "/priceall":
+	case text == "/pall":
 		b.cmdPriceAll(ctx, chatID)
-	case strings.HasPrefix(text, "/price"):
+	case strings.HasPrefix(text, "/p"):
 		b.cmdPrice(ctx, chatID, text)
 	case text == "/start":
-		b.reply(chatID, "Бот для отслеживания цен криптовалют")
+		b.reply(chatID, "Бот для отслеживания цен на Bitget")
 	default:
-		if text != "" {
-			b.reply(chatID, "Эхо: "+text)
-		}
+
 	}
 }
 
@@ -130,7 +128,7 @@ func (b *TelegramBot) reply(chatID int64, text string) {
 func (b *TelegramBot) cmdAddAlert(ctx context.Context, chatID int64, text string) {
 	parts := strings.Fields(text)
 	if len(parts) != 4 {
-		b.reply(chatID, "Использование: /addalert TICKER price|pct VALUE\nПример: /addalert BTCUSDT price 50000")
+		b.reply(chatID, "Использование: /add TICKER price|pct VALUE\nПример: /add BTCUSDT price 50000")
 		return
 	}
 
@@ -206,7 +204,7 @@ func (b *TelegramBot) cmdListAlerts(chatID int64) {
 	sort.Strings(symbols)
 
 	var msg strings.Builder
-	msg.WriteString("Ваши алерты:\n\n")
+	msg.WriteString("Текущие алерты:\n\n")
 
 	for _, symbol := range symbols {
 		msg.WriteString(fmt.Sprintf("%s:\n", symbol))
@@ -236,7 +234,7 @@ func (b *TelegramBot) cmdListAlerts(chatID int64) {
 func (b *TelegramBot) cmdDelAlert(chatID int64, text string) {
 	parts := strings.Fields(text)
 	if len(parts) != 2 {
-		b.reply(chatID, "Использование: /delalert ID")
+		b.reply(chatID, "Использование: /del ID")
 		return
 	}
 
@@ -283,7 +281,7 @@ func (b *TelegramBot) cmdPriceAll(ctx context.Context, chatID int64) {
 		symbolsMap[alert.Symbol] = struct{}{}
 	}
 
-	msg := "Цены ваших токенов:\n\n"
+	msg := "\u2060 \n"
 
 	for symbol := range symbolsMap {
 		priceInfo, err := prices.FetchPriceInfo(nil, symbol)
@@ -311,7 +309,7 @@ func (b *TelegramBot) cmdPriceAll(ctx context.Context, chatID int64) {
 func (b *TelegramBot) cmdPrice(ctx context.Context, chatID int64, text string) {
 	parts := strings.Fields(text)
 	if len(parts) != 2 {
-		b.reply(chatID, "Использование: /price TICKER\nПример: /price BTCUSDT")
+		b.reply(chatID, "Использование: /p TICKER\nПример: /p BTCUSDT")
 		return
 	}
 
