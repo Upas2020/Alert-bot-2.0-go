@@ -16,6 +16,7 @@ build/
 # Env
 .env
 alerts.json
+*.json
 # Dependencies cache
 vendor/
 # Database
