@@ -18,5 +18,8 @@ build/
 alerts.json
 # Dependencies cache
 vendor/
-
+# Database
+*.db
+*.db-journal
+alerts.json.backup.*
 

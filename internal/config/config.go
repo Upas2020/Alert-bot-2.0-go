@@ -13,6 +13,7 @@ type Config struct {
 	LogLevel               string
 	SharpChangePercent     float64 // Процент для алертов о резких изменениях
 	SharpChangeIntervalMin int     // Интервал в минутах для проверки резких изменений
+	DatabasePath           string  // Путь к файлу базы данных SQLite
 }
 
 // Load загружает конфигурацию из переменных окружения.
@@ -48,10 +49,17 @@ func Load() (Config, error) {
 		}
 	}
 
+	// DATABASE_PATH: путь к файлу базы данных SQLite (по умолчанию data/alerts.db)
+	databasePath := "data/alerts.db"
+	if v := os.Getenv("DATABASE_PATH"); v != "" {
+		databasePath = strings.TrimSpace(v)
+	}
+
 	return Config{
 		BotToken:               token,
 		LogLevel:               logLevel,
 		SharpChangePercent:     sharpChangePercent,
 		SharpChangeIntervalMin: sharpChangeIntervalMin,
+		DatabasePath:           databasePath,
 	}, nil
 }

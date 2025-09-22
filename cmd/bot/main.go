@@ -45,6 +45,7 @@ func main() {
 		"log_level":                 cfg.LogLevel,
 		"sharp_change_percent":      cfg.SharpChangePercent,
 		"sharp_change_interval_min": cfg.SharpChangeIntervalMin,
+		"database_path":             cfg.DatabasePath,
 	}).Info("config loaded")
 
 	bot, err := internalbot.NewTelegramBot(cfg)
