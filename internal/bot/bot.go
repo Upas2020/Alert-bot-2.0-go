@@ -132,7 +132,7 @@ func (b *TelegramBot) handleUpdate(ctx context.Context, upd tgbotapi.Update) {
 	case text == "/stats":
 		b.cmdStats(chatID)
 	case text == "/start":
-		b.reply(chatID, "Way2Million, powered by Saint_Dmitriy\n\n*Цены:*\n/p TICKER - показать текущую цену\n/pall - показать цену всех токенов, по которым есть активные алерты/коллы\n\n*Алерты:*\n/addalert TICKER price|pct VALUE - создать алерт\n/alerts - список активных алертов\n/dell alertid- удалить алерт\n\n*Коллы:*\n/ocall TICKER [long|short] - открыть колл (по умолчанию long)\n/ccall CALLID - закрыть колл\n/mycalls - мои активные коллы\n/allcalls - коллы всех пользователей\n\n*Статистика:*\n/callstats - рейтинг трейдеров за 90 дней\n/mycallstats - моя общая статистика за 90 дней\n/mytrades - моя статистика по токенам\n/stats- статистика по сработавшим алертам\n/history - история сработавших алертов")
+		b.reply(chatID, "Way2Million, by Saint\\_Dmitriy\n\n*Цены:*\n/p TICKER - показать текущую цену\n/pall - показать цену всех токенов, по которым есть активные алерты/коллы\n\n*Алерты:*\n/addalert TICKER price|pct VALUE - создать алерт\n/alerts - список активных алертов\n/dell alertid - удалить алерт\n\n*Коллы:*\n/ocall TICKER [long|short] - открыть колл (по умолчанию long)\n/ccall CALLID - закрыть колл\n/mycalls - мои активные коллы\n/allcalls - коллы всех пользователей\n\n*Статистика:*\n/callstats - рейтинг трейдеров за 90 дней\n/mycallstats - моя общая статистика за 90 дней\n/mytrades - моя статистика по токенам\n/stats - статистика по сработавшим алертам\n/history - история сработавших алертов")
 	default:
 		// Игнорируем неизвестные команды и сообщения
 	}
@@ -882,7 +882,7 @@ func (b *TelegramBot) checkSharpChange(symbol string, currentPrice float64) {
 
 			// Отправляем уведомление каждому пользователю с алертами на этот символ
 			if len(alertedUsers) > 0 {
-				msg := fmt.Sprintf("РЕЗКОЕ ИЗМЕНЕНИЕ! %s %s на %.2f%% за %dм (от %s до %s)",
+				msg := fmt.Sprintf("%s %s на %.2f%% за %dм (от %s до %s)",
 					symbol, direction, absChangePct, b.cfg.SharpChangeIntervalMin,
 					prices.FormatPrice(oldPrice), prices.FormatPrice(currentPrice))
 

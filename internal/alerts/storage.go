@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/sirupsen/logrus"
+	_ "modernc.org/sqlite"
 )
 
 type Alert struct {
@@ -88,7 +88,7 @@ func NewDatabaseStorage(dbPath string) (*DatabaseStorage, error) {
 		dbPath = "data/alerts.db"
 	}
 
-	db, err := sql.Open("sqlite3", dbPath+"?_foreign_keys=on")
+	db, err := sql.Open("sqlite", dbPath+"?_foreign_keys=on")
 	if err != nil {
 		return nil, err
 	}
