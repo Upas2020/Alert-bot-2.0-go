@@ -33,7 +33,7 @@ func Load() (Config, error) {
 	}
 
 	// SHARP_CHANGE_PERCENT: процент для алертов о резких изменениях (по умолчанию 10%)
-	sharpChangePercent := 0.2
+	sharpChangePercent := 5.0
 	if v := os.Getenv("SHARP_CHANGE_PERCENT"); v != "" {
 		v = strings.ReplaceAll(v, ",", ".")
 		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
