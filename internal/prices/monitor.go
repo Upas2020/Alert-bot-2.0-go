@@ -2,7 +2,6 @@ package prices
 
 import (
 	"context"
-	"net/http"
 	"sync"
 	"time"
 
@@ -16,8 +15,9 @@ type SymbolProvider interface {
 
 // PriceMonitor периодически опрашивает цены и сообщает об изменениях через callback.
 type PriceMonitor struct {
-	Client           *http.Client
-	SymbolProvider   SymbolProvider // Провайдер для получения актуального списка символов
+	//Client           *http.Client // Удаляем, так как ExchangeClients уже содержит клиенты
+	ExchangeClients  *ExchangeClients // Добавляем клиентов бирж
+	SymbolProvider   SymbolProvider   // Провайдер для получения актуального списка символов
 	ThresholdPercent float64
 	Interval         time.Duration
 
@@ -31,7 +31,7 @@ func NewPriceMonitor(symbols []string, thresholdPercent float64, intervalSec int
 		intervalSec = 30
 	}
 	return &PriceMonitor{
-		Client:           &http.Client{Timeout: 10 * time.Second},
+		//Client:           &http.Client{Timeout: 10 * time.Second}, // Удаляем
 		ThresholdPercent: thresholdPercent,
 		Interval:         time.Duration(intervalSec) * time.Second,
 		lastPriceBy:      make(map[string]float64),
@@ -39,12 +39,13 @@ func NewPriceMonitor(symbols []string, thresholdPercent float64, intervalSec int
 }
 
 // NewPriceMonitorWithProvider создает монитор с провайдером символов, запрашивает цены каждые 60 секунд
-func NewPriceMonitorWithProvider(provider SymbolProvider, thresholdPercent float64, intervalSec int) *PriceMonitor {
+func NewPriceMonitorWithProvider(provider SymbolProvider, clients *ExchangeClients, thresholdPercent float64, intervalSec int) *PriceMonitor {
 	if intervalSec <= 0 {
 		intervalSec = 60
 	}
 	return &PriceMonitor{
-		Client:           &http.Client{Timeout: 10 * time.Second},
+		//Client:           &http.Client{Timeout: 10 * time.Second}, // Удаляем
+		ExchangeClients:  clients, // Передаем клиентов
 		SymbolProvider:   provider,
 		ThresholdPercent: thresholdPercent,
 		Interval:         time.Duration(intervalSec) * time.Second,
@@ -87,11 +88,12 @@ func (m *PriceMonitor) poll(onAlert func(string, float64, float64, float64)) {
 	}
 
 	for _, sym := range symbols {
-		price, err := FetchSpotPrice(m.Client, sym)
+		priceInfo, err := FetchPriceInfo(m.ExchangeClients, sym)
 		if err != nil {
 			logrus.WithError(err).WithField("symbol", sym).Warn("fetch price failed")
 			continue
 		}
+		price := priceInfo.CurrentPrice
 
 		m.mu.Lock()
 		prev, had := m.lastPriceBy[sym]

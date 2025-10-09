@@ -3,10 +3,12 @@ module example.com/alert-bot
 go 1.25.1
 
 require (
+	//github.com/bybit-exchange/bybit.go.api v0.0.0-20250727214011-c9347d6804d6 // Удалено, так как используем нативные HTTP запросы
 	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
 	github.com/joho/godotenv v1.5.1
 	github.com/sirupsen/logrus v1.9.3
-	modernc.org/sqlite v1.18.2
+	modernc.org/sqlite v1.18.2 // Используем pure Go SQLite драйвер
+//github.com/mattn/go-sqlite3 v1.14.22 // Удалено, так как modernc.org/sqlite не требует GCC
 )
 
 require (
@@ -15,7 +17,7 @@ require (
 	github.com/mattn/go-isatty v0.0.16 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20200410134404-eec4a21b6bb0 // indirect
 	golang.org/x/mod v0.3.0 // indirect
-	golang.org/x/sys v0.0.0-20220811171246-fbc7d0a398ab // indirect
+	golang.org/x/sys v0.25.0 // indirect
 	golang.org/x/tools v0.0.0-20201124115921-2c860bdd6e78 // indirect
 	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
 	lukechampine.com/uint128 v1.1.1 // indirect

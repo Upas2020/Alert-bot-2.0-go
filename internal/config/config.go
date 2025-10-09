@@ -14,6 +14,8 @@ type Config struct {
 	SharpChangePercent     float64 // Процент для алертов о резких изменениях
 	SharpChangeIntervalMin int     // Интервал в минутах для проверки резких изменений
 	DatabasePath           string  // Путь к файлу базы данных SQLite
+	BybitAPIKey            string  // API ключ Bybit
+	BybitSecret            string  // Секретный ключ Bybit
 }
 
 // Load загружает конфигурацию из переменных окружения.
@@ -55,11 +57,16 @@ func Load() (Config, error) {
 		databasePath = strings.TrimSpace(v)
 	}
 
+	bybitAPIKey := os.Getenv("BYBIT_API_KEY")
+	bybitSecret := os.Getenv("BYBIT_SECRET")
+
 	return Config{
 		BotToken:               token,
 		LogLevel:               logLevel,
 		SharpChangePercent:     sharpChangePercent,
 		SharpChangeIntervalMin: sharpChangeIntervalMin,
 		DatabasePath:           databasePath,
+		BybitAPIKey:            bybitAPIKey,
+		BybitSecret:            bybitSecret,
 	}, nil
 }
