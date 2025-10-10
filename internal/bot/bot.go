@@ -112,7 +112,7 @@ func (b *TelegramBot) handleUpdate(ctx context.Context, upd tgbotapi.Update) {
 	switch {
 	case text == "/chatid":
 		b.reply(chatID, fmt.Sprintf("Chat ID: %d\nUser ID: %d\nUsername: %s", chatID, userID, username))
-	case strings.HasPrefix(text, "/addalert"):
+	case strings.HasPrefix(text, "/add"):
 		b.cmdAddAlert(ctx, chatID, userID, username, text)
 	case text == "/alerts":
 		b.cmdListAlerts(chatID)
@@ -120,7 +120,7 @@ func (b *TelegramBot) handleUpdate(ctx context.Context, upd tgbotapi.Update) {
 		b.cmdDelAlert(chatID, text)
 	case text == "/clearallalerts":
 		b.cmdDelAllAlerts(chatID)
-	case text == "/priceall":
+	case text == "/allp":
 		b.cmdPriceAll(ctx, chatID)
 	case strings.HasPrefix(text, "/p"):
 		b.cmdPrice(ctx, chatID, text)
@@ -147,7 +147,7 @@ func (b *TelegramBot) handleUpdate(ctx context.Context, upd tgbotapi.Update) {
 	case text == "/rush":
 		b.cmdRush(ctx, chatID, userID)
 	case text == "/start":
-		b.reply(chatID, "*Way2Million, by Saint\\_Dmitriy*\n\n*Команды:*\n/start - список всех команд бота\n/chatid - показать Chat ID, User ID и Username\n/addalert TICKER price|pct VALUE - создать алерт\n/alerts - показать все активные алерты пользователя\n/del ID - удалить алерт по ID\n/clearallalerts - удалить все алерты\n/p TICKER - показать цену одного символа с изменениями\n/priceall - показать цены всех токенов из алертов и коллов\n/ocall TICKER [long|short] - открыть колл (по умолчанию long)\n/ccall CALLID [size] - закрыть колл по ID (по умолчанию закрывается 100%)\n/sl CALLID [price] - установить/обновить стоп-лосс для колла (по умолчанию цена открытия)\n/mycalls - показать активные коллы с текущим PnL\n/allcalls - показать все коллы всех пользователей\n/rush - закрыть все открытые коллы пользователя\n/callstats - рейтинг трейдеров за 90 дней\n/mycallstats - персональная статистика коллов за 90 дней\n/mytrades - статистика по символам за 90 дней\n/history - история сработавших алертов\n/stats - статистика по активным алертам")
+		b.reply(chatID, "*Way2Million, by Saint\\_Dmitriy*\n\n*Команды:*\n/start - список всех команд бота\n/chatid - показать Chat ID, User ID и Username\n/add TICKER price|pct VALUE - создать алерт\n/alerts - показать все активные алерты пользователя\n/del ID - удалить алерт по ID\n/clearallalerts - удалить все алерты\n/p TICKER - показать цену одного символа с изменениями\n/allp - показать цены всех токенов из алертов и коллов\n/ocall TICKER [long|short] [size] sl [sl PRICE] - открыть колл (по умолчанию long), по умолчанию без стопа \n/ccall CALLID [size] - закрыть колл по ID (по умолчанию закрывается 100%)\n/sl CALLID [price] - установить/обновить стоп-лосс для колла (по умолчанию цена открытия)\n/mycalls - показать активные коллы с текущим PnL\n/allcalls - показать все коллы всех пользователей\n/rush - закрыть все открытые коллы пользователя\n/callstats - рейтинг трейдеров за 90 дней\n/mycallstats - персональная статистика коллов за 90 дней\n/mytrades - статистика по символам за 90 дней\n/history - история сработавших алертов\n/stats - статистика по активным алертам")
 	default:
 		// Игнорируем неизвестные команды и сообщения
 	}
