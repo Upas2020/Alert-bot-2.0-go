@@ -112,15 +112,15 @@ func (b *TelegramBot) handleUpdate(ctx context.Context, upd tgbotapi.Update) {
 	switch {
 	case text == "/chatid":
 		b.reply(chatID, fmt.Sprintf("Chat ID: %d\nUser ID: %d\nUsername: %s", chatID, userID, username))
-	case strings.HasPrefix(text, "/add"):
+	case strings.HasPrefix(text, "/addalert"):
 		b.cmdAddAlert(ctx, chatID, userID, username, text)
 	case text == "/alerts":
 		b.cmdListAlerts(chatID)
 	case strings.HasPrefix(text, "/del"):
 		b.cmdDelAlert(chatID, text)
-	case text == "/delallalerts":
+	case text == "/clearallalerts":
 		b.cmdDelAllAlerts(chatID)
-	case text == "/pall":
+	case text == "/priceall":
 		b.cmdPriceAll(ctx, chatID)
 	case strings.HasPrefix(text, "/p"):
 		b.cmdPrice(ctx, chatID, text)
@@ -128,6 +128,8 @@ func (b *TelegramBot) handleUpdate(ctx context.Context, upd tgbotapi.Update) {
 		b.cmdOpenCall(ctx, chatID, userID, username, text)
 	case strings.HasPrefix(text, "/ccall"):
 		b.cmdCloseCall(ctx, chatID, userID, text)
+	case strings.HasPrefix(text, "/sl"):
+		b.cmdSetStopLoss(ctx, chatID, userID, text)
 	case text == "/mycalls":
 		b.cmdMyCalls(ctx, chatID, userID)
 	case text == "/allcalls":
@@ -141,9 +143,11 @@ func (b *TelegramBot) handleUpdate(ctx context.Context, upd tgbotapi.Update) {
 	case strings.HasPrefix(text, "/history"):
 		b.cmdHistory(chatID, text)
 	case text == "/stats":
-		b.cmdStats(chatID)
+		b.cmdStats(chatID, userID)
+	case text == "/rush":
+		b.cmdRush(ctx, chatID, userID)
 	case text == "/start":
-		b.reply(chatID, "Way2Million, by Saint\\_Dmitriy\n\n*Цены:*\n/p TICKER - показать текущую цену\n/pall - показать цену всех токенов, по которым есть активные алерты/коллы\n\n*Алерты:*\n/addalert TICKER price|pct VALUE - создать алерт\n/alerts - список активных алертов\n/dell alertid - удалить алерт\n\n*Коллы:*\n/ocall TICKER [long|short] - открыть колл (по умолчанию long)\n/ccall CALLID - закрыть колл\n/mycalls - мои активные коллы\n/allcalls - коллы всех пользователей\n\n*Статистика:*\n/callstats - рейтинг трейдеров за 90 дней\n/mycallstats - моя общая статистика за 90 дней\n/mytrades - моя статистика по токенам\n/stats - статистика по сработавшим алертам\n/history - история сработавших алертов")
+		b.reply(chatID, "*Way2Million, by Saint\\_Dmitriy*\n\n*Команды:*\n/start - список всех команд бота\n/chatid - показать Chat ID, User ID и Username\n/addalert TICKER price|pct VALUE - создать алерт\n/alerts - показать все активные алерты пользователя\n/del ID - удалить алерт по ID\n/clearallalerts - удалить все алерты\n/p TICKER - показать цену одного символа с изменениями\n/priceall - показать цены всех токенов из алертов и коллов\n/ocall TICKER [long|short] - открыть колл (по умолчанию long)\n/ccall CALLID [size] - закрыть колл по ID (по умолчанию закрывается 100%)\n/sl CALLID [price] - установить/обновить стоп-лосс для колла (по умолчанию цена открытия)\n/mycalls - показать активные коллы с текущим PnL\n/allcalls - показать все коллы всех пользователей\n/rush - закрыть все открытые коллы пользователя\n/callstats - рейтинг трейдеров за 90 дней\n/mycallstats - персональная статистика коллов за 90 дней\n/mytrades - статистика по символам за 90 дней\n/history - история сработавших алертов\n/stats - статистика по активным алертам")
 	default:
 		// Игнорируем неизвестные команды и сообщения
 	}
@@ -184,34 +188,44 @@ func (b *TelegramBot) cmdAddAlert(ctx context.Context, chatID int64, userID int6
 		Symbol:   symbol,
 	}
 
+	preferredExchange, preferredMarket := b.getPreferredExchangeMarketForSymbol(symbol)
+
 	switch alertType {
 	case "price":
 		alert.TargetPrice = value
-		alert, err = b.st.Add(alert)
-		if err != nil {
-			b.reply(chatID, "Ошибка создания алерта: "+err.Error())
-			return
-		}
-		b.reply(chatID, fmt.Sprintf("Алерт создан (ID: `%s`)\n%s достигнет %s", alert.ID, symbol, prices.FormatPrice(value)))
-
-		// Перезапускаем мониторинг с новым символом
-		b.restartMonitoring(ctx)
-	case "pct":
-		alert.TargetPercent = value
-		// Получаем текущую цену для базовой
-		priceInfo, err := prices.FetchPriceInfo(b.pricesClients, symbol)
+		priceInfo, err := prices.FetchPriceInfo(b.pricesClients, symbol, preferredExchange, preferredMarket)
 		if err != nil {
 			b.reply(chatID, "Ошибка получения цены для "+symbol+": "+err.Error())
 			return
 		}
-		alert.BasePrice = priceInfo.CurrentPrice
+		alert.Exchange = priceInfo.Exchange
 		alert.Market = priceInfo.Market
 		alert, err = b.st.Add(alert)
 		if err != nil {
 			b.reply(chatID, "Ошибка создания алерта: "+err.Error())
 			return
 		}
-		b.reply(chatID, fmt.Sprintf("Алерт создан (ID: `%s`)\n%s изменится на %.2f%% от %s", alert.ID, symbol, value, prices.FormatPrice(priceInfo.CurrentPrice)))
+		b.reply(chatID, fmt.Sprintf("Алерт создан (ID: `%s`)\n%s на %s %s достигнет %s (текущая: %s)", alert.ID, symbol, alert.Exchange, alert.Market, prices.FormatPrice(value), prices.FormatPrice(priceInfo.CurrentPrice)))
+
+		// Перезапускаем мониторинг с новым символом
+		b.restartMonitoring(ctx)
+	case "pct":
+		alert.TargetPercent = value
+		// Получаем текущую цену для базовой
+		priceInfo, err := prices.FetchPriceInfo(b.pricesClients, symbol, preferredExchange, preferredMarket)
+		if err != nil {
+			b.reply(chatID, "Ошибка получения цены для "+symbol+": "+err.Error())
+			return
+		}
+		alert.BasePrice = priceInfo.CurrentPrice
+		alert.Market = priceInfo.Market
+		alert.Exchange = priceInfo.Exchange
+		alert, err = b.st.Add(alert)
+		if err != nil {
+			b.reply(chatID, "Ошибка создания алерта: "+err.Error())
+			return
+		}
+		b.reply(chatID, fmt.Sprintf("Алерт создан (ID: `%s`)\n%s на %s %s изменится на %.2f%% от %s (текущая: %s)", alert.ID, symbol, alert.Exchange, alert.Market, value, prices.FormatPrice(priceInfo.CurrentPrice), prices.FormatPrice(priceInfo.CurrentPrice)))
 
 		// Перезапускаем мониторинг с новым символом
 		b.restartMonitoring(ctx)
@@ -223,26 +237,58 @@ func (b *TelegramBot) cmdAddAlert(ctx context.Context, chatID int64, userID int6
 // cmdOpenCall обрабатывает команду /ocall TICKER [long|short]
 func (b *TelegramBot) cmdOpenCall(ctx context.Context, chatID int64, userID int64, username string, text string) {
 	parts := strings.Fields(text)
-	if len(parts) < 2 || len(parts) > 3 {
-		b.reply(chatID, "Использование: /ocall TICKER [long|short]\nПример: /ocall BTCUSDT long")
+	if len(parts) < 2 || len(parts) > 6 { // Добавляем возможность для 6 частей (ocall TICKER [long|short] [deposit_percent] [sl PRICE])
+		b.reply(chatID, "Использование: /ocall TICKER [long|short] [deposit_percent] [sl PRICE]\nПример: /ocall BTC long 40 sl 25000 (открыть лонг по BTC с 40% депозита и стоп-лоссом 25000)\nПример: /ocall ETH short")
 		return
 	}
 
 	symbol := formatSymbol(parts[1])
-	direction := "long" // по умолчанию
+	direction := "long"   // по умолчанию
+	depositPercent := 0.0 // по умолчанию 0%
+	stopLossPrice := 0.0  // по умолчанию 0 (без стоп-лосса)
 
-	if len(parts) == 3 {
-		dir := strings.ToLower(parts[2])
-		if dir == "short" || dir == "long" {
-			direction = dir
+	// Парсинг направления, процента депозита и стоп-лосса
+	argIndex := 2
+
+	// Парсинг направления
+	if len(parts) > argIndex {
+		dirOrPctOrSL := strings.ToLower(parts[argIndex])
+		if dirOrPctOrSL == "short" || dirOrPctOrSL == "long" {
+			direction = dirOrPctOrSL
+			argIndex++
+		}
+	}
+
+	// Парсинг процента депозита
+	if len(parts) > argIndex {
+		sizeValStr := parts[argIndex]
+		sizeVal, err := strconv.ParseFloat(sizeValStr, 64)
+		if err == nil && sizeVal >= 0 {
+			depositPercent = sizeVal
+			argIndex++
+		}
+	}
+
+	// Парсинг стоп-лосса
+	if len(parts) > argIndex && strings.ToLower(parts[argIndex]) == "sl" {
+		argIndex++
+		if len(parts) > argIndex {
+			slVal, err := strconv.ParseFloat(parts[argIndex], 64)
+			if err == nil && slVal >= 0 {
+				stopLossPrice = slVal
+			} else {
+				b.reply(chatID, "Неверное значение стоп-лосса. Используйте число >= 0.")
+				return
+			}
 		} else {
-			b.reply(chatID, "Направление должно быть 'long' или 'short'")
+			b.reply(chatID, "Укажите цену для стоп-лосса после 'sl'.")
 			return
 		}
 	}
 
 	// Получаем текущую цену
-	priceInfo, err := prices.FetchPriceInfo(b.pricesClients, symbol)
+	preferredExchange, preferredMarket := b.getPreferredExchangeMarketForSymbol(symbol)
+	priceInfo, err := prices.FetchPriceInfo(b.pricesClients, symbol, preferredExchange, preferredMarket)
 	if err != nil {
 		b.reply(chatID, "Ошибка получения цены для "+symbol+": "+err.Error())
 		return
@@ -250,13 +296,16 @@ func (b *TelegramBot) cmdOpenCall(ctx context.Context, chatID int64, userID int6
 
 	// Создаем колл
 	call := alerts.Call{
-		UserID:     userID,
-		Username:   username,
-		ChatID:     chatID,
-		Symbol:     symbol,
-		Direction:  direction,
-		EntryPrice: priceInfo.CurrentPrice,
-		Market:     priceInfo.Market,
+		UserID:         userID,
+		Username:       username,
+		ChatID:         chatID,
+		Symbol:         symbol,
+		Direction:      direction,
+		EntryPrice:     priceInfo.CurrentPrice,
+		Market:         priceInfo.Market,
+		DepositPercent: depositPercent, // Сохраняем процент от депозита
+		StopLossPrice:  stopLossPrice,  // Сохраняем цену стоп-лосса
+		Exchange:       priceInfo.Exchange,
 	}
 
 	call, err = b.st.OpenCall(call)
@@ -270,8 +319,77 @@ func (b *TelegramBot) cmdOpenCall(ctx context.Context, chatID int64, userID int6
 		directionRus = "Short"
 	}
 
-	b.reply(chatID, fmt.Sprintf("Колл открыт!\nID: `%s`\nСимвол: %s\nНаправление: %s\nЦена входа: %s",
-		call.ID, symbol, directionRus, prices.FormatPrice(priceInfo.CurrentPrice)))
+	msg := fmt.Sprintf("Колл открыт!\nID: `%s`\nСимвол: %s\nНаправление: %s\nЦена входа: %s",
+		call.ID, symbol, directionRus, prices.FormatPrice(call.EntryPrice))
+
+	if call.DepositPercent > 0 {
+		msg += fmt.Sprintf("\nПроцент от депозита: %.0f%%", call.DepositPercent)
+	}
+
+	if call.StopLossPrice > 0 {
+		msg += fmt.Sprintf("\nСтоп-лосс: %s", prices.FormatPrice(call.StopLossPrice))
+	}
+	msg += fmt.Sprintf("\nБиржа: %s, Рынок: %s", call.Exchange, call.Market)
+
+	b.reply(chatID, msg)
+}
+
+// cmdSetStopLoss обрабатывает команду /sl CALLID [price]
+func (b *TelegramBot) cmdSetStopLoss(ctx context.Context, chatID int64, userID int64, text string) {
+	parts := strings.Fields(text)
+	if len(parts) < 2 || len(parts) > 3 {
+		b.reply(chatID, "Использование: /sl CALLID [price]\nПример: /sl `abc123de` 25000 (установить стоп-лосс на 25000)\nПример: /sl `abc123de` (удалить стоп-лосс или установить на 0)")
+		return
+	}
+
+	callID := parts[1]
+	stopLossPrice := 0.0 // По умолчанию удаляем стоп-лосс
+
+	if len(parts) == 3 {
+		slVal, err := strconv.ParseFloat(parts[2], 64)
+		if err != nil || slVal < 0 {
+			b.reply(chatID, "Неверное значение стоп-лосса. Используйте число >= 0.")
+			return
+		}
+		stopLossPrice = slVal
+	}
+
+	// Получаем информацию о колле, чтобы проверить существование и принадлежность
+	call, err := b.st.GetCallByID(callID, userID)
+	if err != nil {
+		b.reply(chatID, "Колл не найден или не принадлежит вам")
+		return
+	}
+
+	if call.Status != "open" {
+		b.reply(chatID, "Нельзя установить стоп-лосс для закрытого колла")
+		return
+	}
+
+	// Если цена стоп-лосса не указана, используем цену входа как стоп-лосс по умолчанию.
+	if len(parts) == 2 { // Значит, price не указан, только /sl CALLID
+		stopLossPrice = call.EntryPrice
+	}
+
+	// Обновляем стоп-лосс в БД
+	err = b.st.UpdateStopLoss(callID, userID, stopLossPrice)
+	if err != nil {
+		b.reply(chatID, "Ошибка обновления стоп-лосса: "+err.Error())
+		return
+	}
+
+	// Отправляем подтверждение
+	if stopLossPrice > 0 {
+		var replyMsg string
+		if len(parts) == 2 { // Стоп-лосс установлен на цену входа
+			replyMsg = fmt.Sprintf("Стоп-лосс для колла `%s` установлен на цену входа: %s", callID, prices.FormatPrice(stopLossPrice))
+		} else { // Стоп-лосс установлен на указанную цену
+			replyMsg = fmt.Sprintf("Стоп-лосс для колла `%s` установлен на %s", callID, prices.FormatPrice(stopLossPrice))
+		}
+		b.reply(chatID, replyMsg)
+	} else { // stopLossPrice == 0, что означает удаление стоп-лосса
+		b.reply(chatID, fmt.Sprintf("Стоп-лосс для колла `%s` удален", callID))
+	}
 }
 
 // cmdCloseCall обрабатывает команду /ccall CALLID [size]
@@ -307,7 +425,8 @@ func (b *TelegramBot) cmdCloseCall(ctx context.Context, chatID int64, userID int
 	}
 
 	// Получаем текущую цену для символа из колла
-	priceInfo, err := prices.FetchPriceInfo(b.pricesClients, call.Symbol)
+	preferredExchange, preferredMarket := b.getPreferredExchangeMarketForSymbol(call.Symbol)
+	priceInfo, err := prices.FetchPriceInfo(b.pricesClients, call.Symbol, preferredExchange, preferredMarket)
 	if err != nil {
 		b.reply(chatID, fmt.Sprintf("Ошибка получения цены для %s: %s", call.Symbol, err.Error()))
 		logrus.WithError(err).WithField("symbol", call.Symbol).Warn("failed to fetch price info for closing call")
@@ -361,13 +480,16 @@ func (b *TelegramBot) cmdMyCalls(ctx context.Context, chatID int64, userID int64
 	var msg strings.Builder
 	msg.WriteString("Ваши активные коллы:\n\n")
 
+	var totalDepositPercent float64
+	var totalPnlToDeposit float64
+
 	for i, call := range calls {
 		directionRus := "Long"
 		if call.Direction == "short" {
 			directionRus = "Short"
 		}
 		// Получаем текущую цену для расчета текущего PnL
-		priceInfo, err := prices.FetchPriceInfo(b.pricesClients, call.Symbol)
+		priceInfo, err := prices.FetchPriceInfo(b.pricesClients, call.Symbol, call.Exchange, call.Market)
 		if err != nil {
 			logrus.WithError(err).WithField("symbol", call.Symbol).Warn("failed to get current price for call")
 			// Если не можем получить текущую цену, используем цену входа для расчета PnL
@@ -393,11 +515,30 @@ func (b *TelegramBot) cmdMyCalls(ctx context.Context, chatID int64, userID int64
 
 		msg.WriteString(fmt.Sprintf("%d. %s (%s) - ID: `%s`\n", i+1, call.Symbol, directionRus, call.ID))
 		msg.WriteString(fmt.Sprintf("   Цена входа: %s\n", prices.FormatPrice(call.EntryPrice)))
+		msg.WriteString(fmt.Sprintf("   Биржа: %s, Рынок: %s\n", call.Exchange, call.Market))
 		if call.Size < 100 {
 			msg.WriteString(fmt.Sprintf("   Открытый размер: %.0f\n", call.Size))
 		}
+		if call.DepositPercent > 0 {
+			msg.WriteString(fmt.Sprintf("   %% от депозита: %.0f%%\n", call.DepositPercent))
+			totalDepositPercent += call.DepositPercent
+			totalPnlToDeposit += (currentPnl / 100) * call.DepositPercent
+		}
 		msg.WriteString(fmt.Sprintf("   Текущая цена: %s\n", prices.FormatPrice(currentPrice)))
 		msg.WriteString(fmt.Sprintf("   Текущий PnL: %s%.2f%%\n\n", pnlSign, currentPnl))
+
+		if call.StopLossPrice > 0 {
+			msg.WriteString(fmt.Sprintf("   Стоп-лосс: %s\n", prices.FormatPrice(call.StopLossPrice)))
+		}
+	}
+
+	if totalDepositPercent > 0 {
+		msg.WriteString(fmt.Sprintf("\n*Совокупный %% от депозита в сделках: %.0f%%*\n", totalDepositPercent))
+		pnlToDepositSign := "+"
+		if totalPnlToDeposit < 0 {
+			pnlToDepositSign = ""
+		}
+		msg.WriteString(fmt.Sprintf("*Совокупный PnL к депозиту: %s%.2f%%*\n", pnlToDepositSign, totalPnlToDeposit))
 	}
 
 	b.reply(chatID, msg.String())
@@ -406,13 +547,86 @@ func (b *TelegramBot) cmdMyCalls(ctx context.Context, chatID int64, userID int64
 // cmdCallStats показывает статистику коллов всех пользователей за последние 90 дней
 func (b *TelegramBot) cmdCallStats(chatID int64) {
 	stats := b.st.GetAllUserStats()
-	if len(stats) == 0 {
-		b.reply(chatID, "Нет данных по коллам за последние 90 дней")
-		return
+
+	// Получаем все активные коллы для расчета текущего процента от депозита и PnL к депозиту
+	activeCalls := b.st.GetAllOpenCalls()
+	activeStatsMap := make(map[int64]struct {
+		TotalActiveDepositPercent float64
+		TotalPnlToDeposit         float64
+	}) // Map для временного хранения активной статистики по пользователям
+
+	for _, call := range activeCalls {
+		if call.DepositPercent > 0 {
+			preferredExchange, preferredMarket := b.getPreferredExchangeMarketForSymbol(call.Symbol)
+			priceInfo, err := prices.FetchPriceInfo(b.pricesClients, call.Symbol, preferredExchange, preferredMarket)
+			if err != nil {
+				logrus.WithError(err).WithField("symbol", call.Symbol).Warn("failed to get current price for active call stats in cmdCallStats")
+				continue
+			}
+			currentPrice := priceInfo.CurrentPrice
+
+			var currentPnl float64
+			if call.Direction == "long" {
+				currentPnl = ((currentPrice - call.EntryPrice) / call.EntryPrice) * 100
+			} else { // short
+				currentPnl = ((call.EntryPrice - currentPrice) / call.EntryPrice) * 100
+			}
+
+			userActiveStats := activeStatsMap[call.UserID]
+			userActiveStats.TotalActiveDepositPercent += call.DepositPercent
+			userActiveStats.TotalPnlToDeposit += (currentPnl / 100) * call.DepositPercent
+			activeStatsMap[call.UserID] = userActiveStats
+		}
 	}
 
+	// Обновляем статистику пользователей из БД с активной статистикой
+	for i := range stats {
+		if active, ok := activeStatsMap[stats[i].UserID]; ok {
+			stats[i].TotalActiveDepositPercent = active.TotalActiveDepositPercent
+			stats[i].TotalPnlToDeposit = active.TotalPnlToDeposit
+		}
+	}
+
+	// Добавляем пользователей, у которых есть только активные коллы, но нет закрытых за 90 дней
+	for userID, active := range activeStatsMap {
+		found := false
+		for _, stat := range stats {
+			if stat.UserID == userID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			// Пытаемся получить username, если его нет в активных коллах
+			var username string
+			for _, call := range activeCalls {
+				if call.UserID == userID {
+					username = call.Username
+					break
+				}
+			}
+			if username == "" {
+				username = fmt.Sprintf("User_%d", userID)
+			}
+			stats = append(stats, alerts.UserStats{
+				UserID:                    userID,
+				Username:                  username,
+				TotalActiveDepositPercent: active.TotalActiveDepositPercent,
+				TotalPnlToDeposit:         active.TotalPnlToDeposit,
+			})
+		}
+	}
+
+	// Сортируем статистику по TotalPnlToDeposit (если есть), иначе по TotalPnl
+	sort.Slice(stats, func(i, j int) bool {
+		if stats[i].TotalPnlToDeposit != 0 || stats[j].TotalPnlToDeposit != 0 {
+			return stats[i].TotalPnlToDeposit > stats[j].TotalPnlToDeposit
+		}
+		return stats[i].TotalPnl > stats[j].TotalPnl
+	})
+
 	var msg strings.Builder
-	msg.WriteString("📊 *Рейтинг трейдеров за последние 90 дней:*\n\n")
+	msg.WriteString("📊 *Рейтинг трейдеров за последние 90 дней (включая активные сделки):*\n\n")
 
 	for i, stat := range stats {
 		pnlSign := "+"
@@ -426,8 +640,18 @@ func (b *TelegramBot) cmdCallStats(chatID int64) {
 		}
 
 		msg.WriteString(fmt.Sprintf("%d. *%s*\n", i+1, username))
-		msg.WriteString(fmt.Sprintf("   💰 PnL: %s%.2f%% | 🎯 Winrate: %.1f%% | 📊 Сделок: %d\n\n",
+		msg.WriteString(fmt.Sprintf("   💰 Закрытый PnL: %s%.2f%% | 🎯 Winrate: %.1f%% | 📊 Сделок: %d\n",
 			pnlSign, stat.TotalPnl, stat.WinRate, stat.ClosedCalls))
+
+		if stat.TotalActiveDepositPercent > 0 {
+			pnlToDepositSign := "+"
+			if stat.TotalPnlToDeposit < 0 {
+				pnlToDepositSign = ""
+			}
+			msg.WriteString(fmt.Sprintf("   💼 %% от депозита (активные): %.0f%% | 📈 PnL к депозиту (активные): %s%.2f%%\n",
+				stat.TotalActiveDepositPercent, pnlToDepositSign, stat.TotalPnlToDeposit))
+		}
+		msg.WriteString("\n")
 	}
 
 	b.reply(chatID, msg.String())
@@ -441,38 +665,76 @@ func (b *TelegramBot) cmdMyCallStats(chatID int64, userID int64) {
 		return
 	}
 
-	if stats.ClosedCalls == 0 {
-		b.reply(chatID, "У вас нет закрытых коллов за последние 90 дней")
+	// Получаем активные коллы для расчета текущего процента от депозита и PnL к депозиту
+	activeCalls := b.st.GetUserCalls(userID, true)
+	var totalActiveDepositPercent float64
+	var totalCurrentPnlToDeposit float64
+
+	for _, call := range activeCalls {
+		if call.DepositPercent > 0 {
+			preferredExchange, preferredMarket := b.getPreferredExchangeMarketForSymbol(call.Symbol)
+			priceInfo, err := prices.FetchPriceInfo(b.pricesClients, call.Symbol, preferredExchange, preferredMarket)
+			if err != nil {
+				logrus.WithError(err).WithField("symbol", call.Symbol).Warn("failed to get current price for active call stats")
+				continue
+			}
+			currentPrice := priceInfo.CurrentPrice
+
+			var currentPnl float64
+			if call.Direction == "long" {
+				currentPnl = ((currentPrice - call.EntryPrice) / call.EntryPrice) * 100
+			} else {
+				currentPnl = ((call.EntryPrice - currentPrice) / call.EntryPrice) * 100
+			}
+
+			totalActiveDepositPercent += call.DepositPercent
+			totalCurrentPnlToDeposit += (currentPnl / 100) * call.DepositPercent
+		}
+	}
+
+	if stats.ClosedCalls == 0 && len(activeCalls) == 0 {
+		b.reply(chatID, "У вас нет закрытых или активных коллов за последние 90 дней")
 		return
 	}
 
 	var msg strings.Builder
 	msg.WriteString("📊 *Ваша статистика коллов за последние 90 дней:*\n\n")
 
-	// Общий PnL
+	// Общий PnL (только для закрытых коллов)
 	pnlSign := "+"
 	if stats.TotalPnl < 0 {
 		pnlSign = ""
 	}
-	msg.WriteString(fmt.Sprintf("💰 *Совокупный PnL:* %s%.2f%%\n", pnlSign, stats.TotalPnl))
+	msg.WriteString(fmt.Sprintf("💰 *Совокупный PnL (закрытые):* %s%.2f%%\n", pnlSign, stats.TotalPnl))
 
-	// Средний PnL
+	// Средний PnL (только для закрытых коллов)
 	avgPnlSign := "+"
 	if stats.AveragePnl < 0 {
 		avgPnlSign = ""
 	}
-	msg.WriteString(fmt.Sprintf("📈 *Средний PnL:* %s%.2f%%\n", avgPnlSign, stats.AveragePnl))
+	msg.WriteString(fmt.Sprintf("📈 *Средний PnL (закрытые):* %s%.2f%%\n", avgPnlSign, stats.AveragePnl))
 
-	// Winrate
-	msg.WriteString(fmt.Sprintf("🎯 *Winrate:* %.1f%% (%d/%d)\n",
+	// Winrate (только для закрытых коллов)
+	msg.WriteString(fmt.Sprintf("🎯 *Winrate (закрытые):* %.1f%% (%d/%d)\n",
 		stats.WinRate, stats.WinningCalls, stats.ClosedCalls))
 
 	// Общая статистика
-	msg.WriteString(fmt.Sprintf("📋 *Всего коллов:* %d\n", stats.TotalCalls))
-	msg.WriteString(fmt.Sprintf("✅ *Закрыто коллов:* %d\n", stats.ClosedCalls))
-	msg.WriteString(fmt.Sprintf("📊 *Активных коллов:* %d\n\n", stats.TotalCalls-stats.ClosedCalls))
+	msg.WriteString(fmt.Sprintf("📋 *Всего коллов (открыто/закрыто):* %d/%d\n", stats.TotalCalls, stats.ClosedCalls))
+	// msg.WriteString(fmt.Sprintf("📊 *Активных коллов:* %d\n\n", stats.TotalCalls-stats.ClosedCalls))
+	msg.WriteString(fmt.Sprintf("📊 *Активных коллов:* %d\n\n", len(activeCalls)))
 
-	// Лучший и худший коллы с деталями
+	// Информация по активным позициям
+	if totalActiveDepositPercent > 0 {
+		msg.WriteString(fmt.Sprintf("*\n*Совокупный %% от депозита в активных сделках: %.0f%%*\n", totalActiveDepositPercent))
+		pnlToDepositSign := "+"
+		if totalCurrentPnlToDeposit < 0 {
+			pnlToDepositSign = ""
+		}
+		msg.WriteString(fmt.Sprintf("*Совокупный PnL к депозиту (активные): %s%.2f%%*\n", pnlToDepositSign, totalCurrentPnlToDeposit))
+		msg.WriteString("\n")
+	}
+
+	// Лучший и худший коллы с деталями (для закрытых коллов)
 	bestCall, worstCall := b.st.GetBestWorstCallsForUser(userID)
 
 	if bestCall != nil {
@@ -532,6 +794,46 @@ func (b *TelegramBot) cmdMyTrades(chatID int64, userID int64) {
 	b.reply(chatID, msg.String())
 }
 
+// cmdRush закрывает все открытые коллы пользователя
+func (b *TelegramBot) cmdRush(ctx context.Context, chatID int64, userID int64) {
+	openCalls := b.st.GetUserCalls(userID, true)
+	if len(openCalls) == 0 {
+		b.reply(chatID, "У вас нет активных коллов для закрытия.")
+		return
+	}
+
+	var successCount int
+	var failCount int
+	var failMessages []string
+
+	for _, call := range openCalls {
+		// Получаем текущую цену для символа
+		priceInfo, err := prices.FetchPriceInfo(b.pricesClients, call.Symbol, call.Exchange, call.Market)
+		if err != nil {
+			failCount++
+			failMessages = append(failMessages, fmt.Sprintf("Колл `%s` (%s): Ошибка получения цены - %s", call.ID, call.Symbol, err.Error()))
+			logrus.WithError(err).WithField("call_id", call.ID).Warn("failed to fetch price for /rush command")
+			continue
+		}
+
+		// Закрываем колл полностью
+		err = b.st.CloseCall(call.ID, call.UserID, priceInfo.CurrentPrice, 100.0)
+		if err != nil {
+			failCount++
+			failMessages = append(failMessages, fmt.Sprintf("Колл `%s` (%s): Ошибка закрытия - %s", call.ID, call.Symbol, err.Error()))
+			logrus.WithError(err).WithField("call_id", call.ID).Error("failed to close call for /rush command")
+		} else {
+			successCount++
+		}
+	}
+
+	responseMsg := fmt.Sprintf("Попытка закрытия всех активных коллов:\nУспешно закрыто: %d\nНе удалось закрыть: %d", successCount, failCount)
+	if failCount > 0 {
+		responseMsg += "\n\nОшибки:\n" + strings.Join(failMessages, "\n")
+	}
+	b.reply(chatID, responseMsg)
+}
+
 // CallWithPnL структура для отображения коллов с текущим PnL
 type CallWithPnL struct {
 	alerts.Call
@@ -550,7 +852,7 @@ func (b *TelegramBot) cmdAllCalls(ctx context.Context, chatID int64) {
 	// Получаем текущие цены и вычисляем PnL для сортировки
 	var callsWithPnl []CallWithPnL
 	for _, call := range calls {
-		priceInfo, err := prices.FetchPriceInfo(b.pricesClients, call.Symbol)
+		priceInfo, err := prices.FetchPriceInfo(b.pricesClients, call.Symbol, call.Exchange, call.Market)
 		if err != nil {
 			logrus.WithError(err).WithField("symbol", call.Symbol).Warn("failed to get current price for call")
 			// Если не можем получить текущую цену, пропускаем этот колл
@@ -600,6 +902,7 @@ func (b *TelegramBot) cmdAllCalls(ctx context.Context, chatID int64) {
 
 		msg.WriteString(fmt.Sprintf("%d. %s - %s (%s)\n", i+1, username, call.Symbol, directionRus))
 		msg.WriteString(fmt.Sprintf("   Цена входа: %s\n", prices.FormatPrice(call.EntryPrice)))
+		msg.WriteString(fmt.Sprintf("   Биржа: %s, Рынок: %s\n", call.Exchange, call.Market))
 		if call.Size < 100 {
 			msg.WriteString(fmt.Sprintf("   Открытый размер: %.0f\n", call.Size))
 		}
@@ -650,6 +953,7 @@ func (b *TelegramBot) cmdListAlerts(chatID int64) {
 				msg.WriteString(fmt.Sprintf("%d. Изменение на %.2f%% от %s, ID: `%s`\n",
 					i+1, alert.TargetPercent, prices.FormatPrice(alert.BasePrice), alert.ID))
 			}
+			msg.WriteString(fmt.Sprintf("   Биржа: %s, Рынок: %s\n", alert.Exchange, alert.Market))
 		}
 		msg.WriteString("\n")
 	}
@@ -706,7 +1010,8 @@ func (b *TelegramBot) cmdPriceAll(ctx context.Context, chatID int64) {
 	msg := "Цены ваших токенов:\n\n"
 
 	for _, symbol := range symbols {
-		priceInfo, err := prices.FetchPriceInfo(b.pricesClients, symbol)
+		preferredExchange, preferredMarket := b.getPreferredExchangeMarketForSymbol(symbol)
+		priceInfo, err := prices.FetchPriceInfo(b.pricesClients, symbol, preferredExchange, preferredMarket)
 		if err != nil {
 			msg += fmt.Sprintf("%s: ошибка получения цены\n", symbol)
 			logrus.WithError(err).WithField("symbol", symbol).Warn("failed to fetch price info")
@@ -720,8 +1025,9 @@ func (b *TelegramBot) cmdPriceAll(ctx context.Context, chatID int64) {
 		change24h := formatChange(priceInfo.Change24h)
 
 		msg += fmt.Sprintf("%s: %s\n", symbol, prices.FormatPrice(priceInfo.CurrentPrice))
-		msg += fmt.Sprintf("15м: %s | 1ч: %s | 4ч: %s | 24ч: %s\n\n",
+		msg += fmt.Sprintf("15м: %s | 1ч: %s | 4ч: %s | 24ч: %s\n",
 			change15m, change1h, change4h, change24h)
+		msg += fmt.Sprintf("Биржа: %s, Рынок: %s\n\n", priceInfo.Exchange, priceInfo.Market)
 	}
 
 	b.reply(chatID, msg)
@@ -736,7 +1042,8 @@ func (b *TelegramBot) cmdPrice(ctx context.Context, chatID int64, text string) {
 	}
 
 	symbol := formatSymbol(parts[1])
-	priceInfo, err := prices.FetchPriceInfo(b.pricesClients, symbol)
+	preferredExchange, preferredMarket := b.getPreferredExchangeMarketForSymbol(symbol)
+	priceInfo, err := prices.FetchPriceInfo(b.pricesClients, symbol, preferredExchange, preferredMarket)
 	if err != nil {
 		b.reply(chatID, fmt.Sprintf("%s: ошибка получения цены - %s", symbol, err.Error()))
 		logrus.WithError(err).WithField("symbol", symbol).Warn("failed to fetch price info")
@@ -752,6 +1059,7 @@ func (b *TelegramBot) cmdPrice(ctx context.Context, chatID int64, text string) {
 	msg := fmt.Sprintf("%s: %s\n", symbol, prices.FormatPrice(priceInfo.CurrentPrice))
 	msg += fmt.Sprintf("15м: %s | 1ч: %s | 4ч: %s | 24ч: %s",
 		change15m, change1h, change4h, change24h)
+	msg += fmt.Sprintf("\nБиржа: %s, Рынок: %s", priceInfo.Exchange, priceInfo.Market)
 
 	b.reply(chatID, msg)
 }
@@ -866,22 +1174,7 @@ func (b *TelegramBot) checkSharpChange(symbol string, currentPrice float64) {
 	preferredExchange := ""
 	preferredMarket := ""
 
-	// Проверяем алерты
-	alertsForSymbol := b.st.GetBySymbol(symbol)
-	if len(alertsForSymbol) > 0 {
-		preferredMarket = alertsForSymbol[0].Market // Используем рынок из первого алерта
-	}
-
-	// Если не нашли в алертах, проверяем коллы
-	if preferredMarket == "" {
-		callsForSymbol := b.st.GetAllOpenCalls()
-		for _, call := range callsForSymbol {
-			if call.Symbol == symbol && call.Market != "" {
-				preferredMarket = call.Market
-				break
-			}
-		}
-	}
+	preferredExchange, preferredMarket = b.getPreferredExchangeMarketForSymbol(symbol)
 
 	b.sharpChangeMu.Lock()
 	lastAlert, exists := b.lastSharpChangeAlert[symbol]
@@ -1038,8 +1331,8 @@ func (b *TelegramBot) cmdHistory(chatID int64, text string) {
 }
 
 // cmdStats показывает статистику по символам
-func (b *TelegramBot) cmdStats(chatID int64) {
-	stats := b.st.GetSymbolStats()
+func (b *TelegramBot) cmdStats(chatID int64, userID int64) {
+	stats := b.st.GetSymbolStats(userID)
 	if len(stats) == 0 {
 		b.reply(chatID, "Нет данных для статистики")
 		return
@@ -1048,36 +1341,33 @@ func (b *TelegramBot) cmdStats(chatID int64) {
 	var msg strings.Builder
 	msg.WriteString("Статистика активных алертов по символам:\n\n")
 
-	// Сортируем по количеству алертов
+	// Для сортировки по количеству активных алертов
 	type symbolStat struct {
-		symbol string
-		count  int
+		symbol             string
+		activeAlertsCount  int
+		totalTriggersCount int
 	}
 
 	var sortedStats []symbolStat
-	for symbol, count := range stats {
-		sortedStats = append(sortedStats, symbolStat{symbol, count})
+	for symbol, stat := range stats {
+		sortedStats = append(sortedStats, symbolStat{symbol, stat.ActiveAlerts, stat.TotalTriggers})
 	}
 
-	// Простая сортировка по убыванию
-	for i := 0; i < len(sortedStats)-1; i++ {
-		for j := i + 1; j < len(sortedStats); j++ {
-			if sortedStats[j].count > sortedStats[i].count {
-				sortedStats[i], sortedStats[j] = sortedStats[j], sortedStats[i]
-			}
-		}
-	}
+	// Сортировка по убыванию количества активных алертов
+	sort.Slice(sortedStats, func(i, j int) bool {
+		return sortedStats[i].activeAlertsCount > sortedStats[j].activeAlertsCount
+	})
 
 	for i, stat := range sortedStats {
-		msg.WriteString(fmt.Sprintf("%d. %s: %d алертов\n", i+1, stat.symbol, stat.count))
+		msg.WriteString(fmt.Sprintf("%d. %s: %d активных алертов, %d срабатываний\n", i+1, stat.symbol, stat.activeAlertsCount, stat.totalTriggersCount))
 	}
 
-	totalAlerts := 0
-	for _, count := range stats {
-		totalAlerts += count
+	var totalActiveAlerts int
+	for _, stat := range stats {
+		totalActiveAlerts += stat.ActiveAlerts
 	}
 
-	msg.WriteString(fmt.Sprintf("\nВсего активных алертов: %d\n", totalAlerts))
+	msg.WriteString(fmt.Sprintf("\nВсего активных алертов: %d\n", totalActiveAlerts))
 	msg.WriteString(fmt.Sprintf("Отслеживается символов: %d", len(stats)))
 
 	b.reply(chatID, msg.String())
@@ -1121,6 +1411,41 @@ func (b *TelegramBot) startMonitoring(ctx context.Context) {
 					b.checkAlerts(symbol, newPrice)
 					// Также проверяем резкие изменения цены
 					b.checkSharpChange(symbol, newPrice)
+
+					// Проверяем стоп-лоссы для открытых коллов
+					for _, call := range symbolCalls {
+						if call.StopLossPrice > 0 {
+							triggeredSL := false
+							var slMsg string
+
+							if call.Direction == "long" && newPrice <= call.StopLossPrice {
+								triggeredSL = true
+								slMsg = fmt.Sprintf("СТОП-ЛОСС! Колл `%s` (%s %s) закрыт по стоп-лоссу: цена %s достигла %s",
+									call.ID, call.Symbol, "Long", prices.FormatPrice(newPrice), prices.FormatPrice(call.StopLossPrice))
+							} else if call.Direction == "short" && newPrice >= call.StopLossPrice {
+								triggeredSL = true
+								slMsg = fmt.Sprintf("СТОП-ЛОСС! Колл `%s` (%s %s) закрыт по стоп-лоссу: цена %s достигла %s",
+									call.ID, call.Symbol, "Short", prices.FormatPrice(newPrice), prices.FormatPrice(call.StopLossPrice))
+							}
+
+							if triggeredSL {
+								logrus.WithFields(logrus.Fields{
+									"call_id":         call.ID,
+									"symbol":          call.Symbol,
+									"current_price":   newPrice,
+									"stop_loss_price": call.StopLossPrice,
+								}).Info("stop-loss triggered")
+
+								// Закрываем колл полностью
+								err := b.st.CloseCall(call.ID, call.UserID, newPrice, 100.0)
+								if err != nil {
+									logrus.WithError(err).WithField("call_id", call.ID).Error("failed to close call by stop-loss")
+								} else {
+									b.reply(call.ChatID, slMsg)
+								}
+							}
+						}
+					}
 				} else {
 					logrus.WithField("symbol", symbol).Debug("no alerts or calls for symbol, skipping check")
 				}
@@ -1146,4 +1471,25 @@ func formatSymbol(symbol string) string {
 		return upperSymbol + "USDT"
 	}
 	return upperSymbol
+}
+
+// getPreferredExchangeMarketForSymbol пытается определить предпочтительную биржу и рынок для символа
+// на основе всех существующих алертов и открытых коллов в системе.
+func (b *TelegramBot) getPreferredExchangeMarketForSymbol(symbol string) (string, string) {
+	// Проверяем алерты
+	alertsForSymbol := b.st.GetBySymbol(symbol)
+	for _, alert := range alertsForSymbol {
+		if alert.Exchange != "" && alert.Market != "" {
+			return alert.Exchange, alert.Market
+		}
+	}
+
+	// Если не нашли в алертах, проверяем коллы
+	callsForSymbol := b.st.GetAllOpenCalls()
+	for _, call := range callsForSymbol {
+		if call.Symbol == symbol && call.Exchange != "" && call.Market != "" {
+			return call.Exchange, call.Market
+		}
+	}
+	return "", ""
 }

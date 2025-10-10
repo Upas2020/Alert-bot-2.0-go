@@ -19,7 +19,8 @@ type Alert struct {
 	UserID        int64     `json:"user_id"`  // ID пользователя Telegram
 	Username      string    `json:"username"` // Username пользователя Telegram
 	Symbol        string    `json:"symbol"`
-	Market        string    `json:"market"` // "spot" или "futures"
+	Market        string    `json:"market"`   // "spot" или "futures"
+	Exchange      string    `json:"exchange"` // "Bitget" или "Bybit"
 	TargetPrice   float64   `json:"target_price,omitempty"`
 	TargetPercent float64   `json:"target_percent,omitempty"`
 	BasePrice     float64   `json:"base_price,omitempty"`
@@ -27,20 +28,23 @@ type Alert struct {
 }
 
 type Call struct {
-	ID         string     `json:"id"`
-	UserID     int64      `json:"user_id"`
-	Username   string     `json:"username"`
-	ChatID     int64      `json:"chat_id"`
-	Symbol     string     `json:"symbol"`
-	Market     string     `json:"market"`    // "spot" или "futures"
-	Direction  string     `json:"direction"` // "long" или "short"
-	EntryPrice float64    `json:"entry_price"`
-	Size       float64    `json:"size"` // Размер позиции (от 0 до 100)
-	ExitPrice  float64    `json:"exit_price,omitempty"`
-	PnlPercent float64    `json:"pnl_percent,omitempty"`
-	Status     string     `json:"status"` // "open" или "closed"
-	OpenedAt   time.Time  `json:"opened_at"`
-	ClosedAt   *time.Time `json:"closed_at,omitempty"`
+	ID             string     `json:"id"`
+	UserID         int64      `json:"user_id"`
+	Username       string     `json:"username"`
+	ChatID         int64      `json:"chat_id"`
+	Symbol         string     `json:"symbol"`
+	Market         string     `json:"market"`    // "spot" или "futures"
+	Exchange       string     `json:"exchange"`  // "Bitget" или "Bybit"
+	Direction      string     `json:"direction"` // "long" или "short"
+	EntryPrice     float64    `json:"entry_price"`
+	Size           float64    `json:"size"`                      // Размер позиции (от 0 до 100) - это не процент от депозита, а скорее абстрактный "объем" позиции
+	DepositPercent float64    `json:"deposit_percent,omitempty"` // Процент от депозита, задействованный в сделке
+	ExitPrice      float64    `json:"exit_price,omitempty"`
+	PnlPercent     float64    `json:"pnl_percent,omitempty"`
+	Status         string     `json:"status"` // "open" или "closed"
+	OpenedAt       time.Time  `json:"opened_at"`
+	ClosedAt       *time.Time `json:"closed_at,omitempty"`
+	StopLossPrice  float64    `json:"stop_loss_price,omitempty"` // Цена стоп-лосса
 }
 
 type AlertTrigger struct {
@@ -63,16 +67,18 @@ type PriceHistory struct {
 }
 
 type UserStats struct {
-	UserID       int64   `json:"user_id"`
-	Username     string  `json:"username"`
-	TotalCalls   int     `json:"total_calls"`
-	ClosedCalls  int     `json:"closed_calls"`
-	WinningCalls int     `json:"winning_calls"`
-	TotalPnl     float64 `json:"total_pnl"`
-	AveragePnl   float64 `json:"average_pnl"`
-	WinRate      float64 `json:"win_rate"`
-	BestCall     float64 `json:"best_call"`
-	WorstCall    float64 `json:"worst_call"`
+	UserID                    int64   `json:"user_id"`
+	Username                  string  `json:"username"`
+	TotalCalls                int     `json:"total_calls"`
+	ClosedCalls               int     `json:"closed_calls"`
+	WinningCalls              int     `json:"winning_calls"`
+	TotalPnl                  float64 `json:"total_pnl"`
+	AveragePnl                float64 `json:"average_pnl"`
+	WinRate                   float64 `json:"win_rate"`
+	BestCall                  float64 `json:"best_call"`
+	WorstCall                 float64 `json:"worst_call"`
+	TotalActiveDepositPercent float64 `json:"total_active_deposit_percent"` // Совокупный % от депозита в активных сделках
+	TotalPnlToDeposit         float64 `json:"total_pnl_to_deposit"`         // Совокупный PnL к депозиту (для активных сделок)
 }
 
 type DatabaseStorage struct {
@@ -106,6 +112,11 @@ func NewDatabaseStorage(dbPath string) (*DatabaseStorage, error) {
 	return storage, nil
 }
 
+func (s *DatabaseStorage) Close() error {
+	logrus.Info("closing database connection")
+	return s.db.Close()
+}
+
 func (s *DatabaseStorage) migrate() error {
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS alerts (
@@ -118,7 +129,8 @@ func (s *DatabaseStorage) migrate() error {
 			target_percent REAL DEFAULT 0,
 			base_price REAL DEFAULT 0,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			market TEXT DEFAULT ''
+			market TEXT DEFAULT '',
+			exchange TEXT DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_alerts_chat_id ON alerts(chat_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_alerts_user_id ON alerts(user_id)`,
@@ -139,7 +151,10 @@ func (s *DatabaseStorage) migrate() error {
 			status TEXT NOT NULL DEFAULT 'open',
 			opened_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			closed_at DATETIME,
-			market TEXT DEFAULT ''
+			market TEXT DEFAULT '',
+			deposit_percent REAL DEFAULT 0,
+			stop_loss_price REAL DEFAULT 0,
+			exchange TEXT DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_calls_user_id ON calls(user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_calls_status ON calls(status)`,
@@ -175,10 +190,14 @@ func (s *DatabaseStorage) migrate() error {
 		`ALTER TABLE alerts ADD COLUMN user_id INTEGER DEFAULT 0`,
 		`ALTER TABLE alerts ADD COLUMN username TEXT DEFAULT ''`,
 		`ALTER TABLE alerts ADD COLUMN market TEXT DEFAULT ''`,
+		`ALTER TABLE alerts ADD COLUMN exchange TEXT DEFAULT ''`,
 		`ALTER TABLE alert_triggers ADD COLUMN user_id INTEGER DEFAULT 0`,
 		`ALTER TABLE alert_triggers ADD COLUMN username TEXT DEFAULT ''`,
 		`ALTER TABLE calls ADD COLUMN market TEXT DEFAULT ''`,
+		`ALTER TABLE calls ADD COLUMN exchange TEXT DEFAULT ''`,
 		`ALTER TABLE calls ADD COLUMN size REAL DEFAULT 100`,
+		`ALTER TABLE calls ADD COLUMN deposit_percent REAL DEFAULT 0`,
+		`ALTER TABLE calls ADD COLUMN stop_loss_price REAL DEFAULT 0`,
 	}
 
 	for _, query := range queries {
@@ -215,10 +234,10 @@ func (s *DatabaseStorage) Add(alert Alert) (Alert, error) {
 	}
 
 	_, err := s.db.Exec(`
-		INSERT INTO alerts (id, chat_id, user_id, username, symbol, market, target_price, target_percent, base_price, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO alerts (id, chat_id, user_id, username, symbol, market, target_price, target_percent, base_price, created_at, exchange)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		alert.ID, alert.ChatID, alert.UserID, alert.Username, alert.Symbol, alert.Market,
-		alert.TargetPrice, alert.TargetPercent, alert.BasePrice, alert.CreatedAt)
+		alert.TargetPrice, alert.TargetPercent, alert.BasePrice, alert.CreatedAt, alert.Exchange)
 
 	if err != nil {
 		return alert, err
@@ -242,17 +261,17 @@ func (s *DatabaseStorage) Update(alert Alert) error {
 
 	_, err := s.db.Exec(`
 		UPDATE alerts 
-		SET chat_id = ?, user_id = ?, username = ?, symbol = ?, market = ?, target_price = ?, target_percent = ?, base_price = ?
+		SET chat_id = ?, user_id = ?, username = ?, symbol = ?, market = ?, target_price = ?, target_percent = ?, base_price = ?, exchange = ?
 		WHERE id = ?`,
 		alert.ChatID, alert.UserID, alert.Username, alert.Symbol, alert.Market,
-		alert.TargetPrice, alert.TargetPercent, alert.BasePrice, alert.ID)
+		alert.TargetPrice, alert.TargetPercent, alert.BasePrice, alert.Exchange, alert.ID)
 
 	return err
 }
 
 func (s *DatabaseStorage) ListByChat(chatID int64) []Alert {
 	rows, err := s.db.Query(`
-		SELECT id, chat_id, COALESCE(user_id, 0), COALESCE(username, ''), symbol, market, target_price, target_percent, base_price, created_at
+		SELECT id, chat_id, COALESCE(user_id, 0), COALESCE(username, ''), symbol, market, target_price, target_percent, base_price, created_at, exchange
 		FROM alerts 
 		WHERE chat_id = ?
 		ORDER BY created_at ASC`, chatID)
@@ -267,7 +286,7 @@ func (s *DatabaseStorage) ListByChat(chatID int64) []Alert {
 	for rows.Next() {
 		var alert Alert
 		err := rows.Scan(&alert.ID, &alert.ChatID, &alert.UserID, &alert.Username, &alert.Symbol, &alert.Market,
-			&alert.TargetPrice, &alert.TargetPercent, &alert.BasePrice, &alert.CreatedAt)
+			&alert.TargetPrice, &alert.TargetPercent, &alert.BasePrice, &alert.CreatedAt, &alert.Exchange)
 		if err != nil {
 			logrus.WithError(err).Warn("failed to scan alert row")
 			continue
@@ -324,7 +343,7 @@ func (s *DatabaseStorage) DeleteAllByChat(chatID int64) (int, error) {
 
 func (s *DatabaseStorage) GetBySymbol(symbol string) []Alert {
 	rows, err := s.db.Query(`
-		SELECT id, chat_id, COALESCE(user_id, 0), COALESCE(username, ''), symbol, market, target_price, target_percent, base_price, created_at
+		SELECT id, chat_id, COALESCE(user_id, 0), COALESCE(username, ''), symbol, market, target_price, target_percent, base_price, created_at, exchange
 		FROM alerts 
 		WHERE symbol = ?`, symbol)
 
@@ -338,7 +357,7 @@ func (s *DatabaseStorage) GetBySymbol(symbol string) []Alert {
 	for rows.Next() {
 		var alert Alert
 		err := rows.Scan(&alert.ID, &alert.ChatID, &alert.UserID, &alert.Username, &alert.Symbol, &alert.Market,
-			&alert.TargetPrice, &alert.TargetPercent, &alert.BasePrice, &alert.CreatedAt)
+			&alert.TargetPrice, &alert.TargetPercent, &alert.BasePrice, &alert.CreatedAt, &alert.Exchange)
 		if err != nil {
 			logrus.WithError(err).Warn("failed to scan alert row")
 			continue
@@ -436,10 +455,10 @@ func (s *DatabaseStorage) OpenCall(call Call) (Call, error) {
 	call.Size = 100.0 // Инициализируем размер позиции по умолчанию
 
 	_, err := s.db.Exec(`
-		INSERT INTO calls (id, user_id, username, chat_id, symbol, market, direction, entry_price, size, status, opened_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO calls (id, user_id, username, chat_id, symbol, market, direction, entry_price, size, status, opened_at, deposit_percent, stop_loss_price, exchange)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		call.ID, call.UserID, call.Username, call.ChatID, call.Symbol, call.Market,
-		call.Direction, call.EntryPrice, call.Size, call.Status, call.OpenedAt)
+		call.Direction, call.EntryPrice, call.Size, call.Status, call.OpenedAt, call.DepositPercent, call.StopLossPrice, call.Exchange)
 
 	if err != nil {
 		return call, err
@@ -461,11 +480,11 @@ func (s *DatabaseStorage) CloseCall(callID string, userID int64, exitPrice float
 	// Получаем информацию о колле
 	var call Call
 	err := s.db.QueryRow(`
-		SELECT id, user_id, username, chat_id, symbol, market, direction, entry_price, size, status
+		SELECT id, user_id, username, chat_id, symbol, market, direction, entry_price, size, status, deposit_percent
 		FROM calls WHERE id = ? AND user_id = ? AND status = 'open'`,
 		callID, userID).Scan(
 		&call.ID, &call.UserID, &call.Username, &call.ChatID,
-		&call.Symbol, &call.Market, &call.Direction, &call.EntryPrice, &call.Size, &call.Status)
+		&call.Symbol, &call.Market, &call.Direction, &call.EntryPrice, &call.Size, &call.Status, &call.DepositPercent)
 
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -489,6 +508,7 @@ func (s *DatabaseStorage) CloseCall(callID string, userID int64, exitPrice float
 	}
 
 	newSize := call.Size - sizeToClose
+	newDepositPercent := call.DepositPercent * (newSize / call.Size) // Пропорционально уменьшаем DepositPercent
 	status := "open"
 	var closedAt sql.NullTime
 
@@ -497,7 +517,8 @@ func (s *DatabaseStorage) CloseCall(callID string, userID int64, exitPrice float
 		status = "closed"
 		now := time.Now()
 		closedAt = sql.NullTime{Time: now, Valid: true}
-		newSize = 0.0 // Устанавливаем в 0 для полного закрытия
+		newSize = 0.0           // Устанавливаем в 0 для полного закрытия
+		newDepositPercent = 0.0 // Если колл закрыт, то процент депозита тоже 0
 	}
 
 	// Обновляем колл в базе данных
@@ -505,9 +526,9 @@ func (s *DatabaseStorage) CloseCall(callID string, userID int64, exitPrice float
 	// size будет оставшимся размером
 	_, err = s.db.Exec(`
 		UPDATE calls
-		SET exit_price = ?, pnl_percent = ?, size = ?, status = ?, closed_at = ?
+		SET exit_price = ?, pnl_percent = ?, size = ?, status = ?, closed_at = ?, deposit_percent = ?
 		WHERE id = ?`,
-		exitPrice, pnlPercentForClosedPart, newSize, status, closedAt, callID)
+		exitPrice, pnlPercentForClosedPart, newSize, status, closedAt, newDepositPercent, callID)
 
 	if err != nil {
 		return err
@@ -530,10 +551,37 @@ func (s *DatabaseStorage) CloseCall(callID string, userID int64, exitPrice float
 	return nil
 }
 
+func (s *DatabaseStorage) UpdateStopLoss(callID string, userID int64, stopLossPrice float64) error {
+	result, err := s.db.Exec(`
+		UPDATE calls
+		SET stop_loss_price = ?
+		WHERE id = ? AND user_id = ? AND status = 'open'`,
+		stopLossPrice, callID, userID)
+	if err != nil {
+		return err
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return errors.New("call not found or already closed")
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"call_id":         callID,
+		"user_id":         userID,
+		"stop_loss_price": stopLossPrice,
+	}).Info("stop-loss updated")
+
+	return nil
+}
+
 func (s *DatabaseStorage) GetUserCalls(userID int64, onlyOpen bool) []Call {
 	query := `
 		SELECT id, user_id, username, chat_id, symbol, market, direction, entry_price, size, 
-		       COALESCE(exit_price, 0), COALESCE(pnl_percent, 0), status, opened_at, closed_at
+		       COALESCE(exit_price, 0), COALESCE(pnl_percent, 0), status, opened_at, closed_at, COALESCE(deposit_percent, 0), COALESCE(stop_loss_price, 0), exchange
 		FROM calls 
 		WHERE user_id = ?`
 
@@ -556,7 +604,7 @@ func (s *DatabaseStorage) GetUserCalls(userID int64, onlyOpen bool) []Call {
 		var closedAt sql.NullTime
 		err := rows.Scan(&call.ID, &call.UserID, &call.Username, &call.ChatID,
 			&call.Symbol, &call.Market, &call.Direction, &call.EntryPrice, &call.Size, &call.ExitPrice,
-			&call.PnlPercent, &call.Status, &call.OpenedAt, &closedAt)
+			&call.PnlPercent, &call.Status, &call.OpenedAt, &closedAt, &call.DepositPercent, &call.StopLossPrice, &call.Exchange)
 		if err != nil {
 			logrus.WithError(err).Warn("failed to scan call row")
 			continue
@@ -573,7 +621,7 @@ func (s *DatabaseStorage) GetUserCalls(userID int64, onlyOpen bool) []Call {
 func (s *DatabaseStorage) GetAllOpenCalls() []Call {
 	rows, err := s.db.Query(`
 		SELECT id, user_id, username, chat_id, symbol, market, direction, entry_price, size, 
-		       COALESCE(exit_price, 0), COALESCE(pnl_percent, 0), status, opened_at, closed_at
+		       COALESCE(exit_price, 0), COALESCE(pnl_percent, 0), status, opened_at, closed_at, COALESCE(deposit_percent, 0), COALESCE(stop_loss_price, 0), exchange
 		FROM calls 
 		WHERE status = 'open'
 		ORDER BY opened_at DESC`)
@@ -590,7 +638,7 @@ func (s *DatabaseStorage) GetAllOpenCalls() []Call {
 		var closedAt sql.NullTime
 		err := rows.Scan(&call.ID, &call.UserID, &call.Username, &call.ChatID,
 			&call.Symbol, &call.Market, &call.Direction, &call.EntryPrice, &call.Size, &call.ExitPrice,
-			&call.PnlPercent, &call.Status, &call.OpenedAt, &closedAt)
+			&call.PnlPercent, &call.Status, &call.OpenedAt, &closedAt, &call.DepositPercent, &call.StopLossPrice, &call.Exchange)
 		if err != nil {
 			logrus.WithError(err).Warn("failed to scan call row")
 			continue
@@ -750,6 +798,66 @@ func (s *DatabaseStorage) GetUserTradesBySymbol(userID int64) map[string]struct 
 	return result
 }
 
+func (s *DatabaseStorage) GetSymbolStats(userID int64) map[string]struct {
+	ActiveAlerts  int
+	TotalTriggers int
+} {
+	result := make(map[string]struct {
+		ActiveAlerts  int
+		TotalTriggers int
+	})
+
+	// Активные алерты
+	rows, err := s.db.Query(`
+		SELECT symbol, COUNT(*) 
+		FROM alerts 
+		WHERE user_id = ? 
+		GROUP BY symbol`,
+		userID)
+	if err != nil {
+		logrus.WithError(err).Warn("failed to get active alerts for symbol stats")
+		return nil
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var symbol string
+		var count int
+		if err := rows.Scan(&symbol, &count); err != nil {
+			logrus.WithError(err).Warn("failed to scan active alerts for symbol stats")
+			continue
+		}
+		stat := result[symbol]
+		stat.ActiveAlerts = count
+		result[symbol] = stat
+	}
+
+	// Общее количество триггеров (за последние 90 дней)
+	rows, err = s.db.Query(`
+		SELECT symbol, COUNT(*) 
+		FROM alert_triggers 
+		WHERE user_id = ? AND triggered_at >= datetime('now', '-90 days') 
+		GROUP BY symbol`,
+		userID)
+	if err != nil {
+		logrus.WithError(err).Warn("failed to get total triggers for symbol stats")
+		return nil
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var symbol string
+		var count int
+		if err := rows.Scan(&symbol, &count); err != nil {
+			logrus.WithError(err).Warn("failed to scan total triggers for symbol stats")
+			continue
+		}
+		stat := result[symbol]
+		stat.TotalTriggers = count
+		result[symbol] = stat
+	}
+
+	return result
+}
+
 func (s *DatabaseStorage) GetBestWorstCallsForUser(userID int64) (bestCall, worstCall *Call) {
 	// Лучший колл
 	var best Call
@@ -786,13 +894,13 @@ func (s *DatabaseStorage) GetCallByID(callID string, userID int64) (*Call, error
 
 	err := s.db.QueryRow(`
 		SELECT id, user_id, username, chat_id, symbol, market, direction, entry_price, size, 
-		       COALESCE(exit_price, 0), COALESCE(pnl_percent, 0), status, opened_at, closed_at
+		       COALESCE(exit_price, 0), COALESCE(pnl_percent, 0), status, opened_at, closed_at, COALESCE(stop_loss_price, 0), exchange
 		FROM calls 
 		WHERE id = ? AND user_id = ?`,
 		callID, userID).Scan(
 		&call.ID, &call.UserID, &call.Username, &call.ChatID,
 		&call.Symbol, &call.Market, &call.Direction, &call.EntryPrice, &call.Size, &call.ExitPrice,
-		&call.PnlPercent, &call.Status, &call.OpenedAt, &closedAt)
+		&call.PnlPercent, &call.Status, &call.OpenedAt, &closedAt, &call.StopLossPrice, &call.Exchange)
 
 	if err != nil {
 		return nil, err
@@ -890,14 +998,15 @@ func (s *DatabaseStorage) GetTriggerHistory(chatID int64, limit int) []AlertTrig
 	}
 
 	rows, err := s.db.Query(`
-		SELECT id, alert_id, symbol, trigger_price, chat_id, COALESCE(user_id, 0), COALESCE(username, ''), trigger_type, triggered_at
-		FROM alert_triggers 
+		SELECT id, alert_id, symbol, trigger_price, chat_id, user_id, username, trigger_type, triggered_at
+		FROM alert_triggers
 		WHERE chat_id = ?
 		ORDER BY triggered_at DESC
-		LIMIT ?`, chatID, limit)
+		LIMIT ?`,
+		chatID, limit)
 
 	if err != nil {
-		logrus.WithError(err).Warn("failed to get trigger history")
+		logrus.WithError(err).Warn("failed to get alert trigger history")
 		return nil
 	}
 	defer rows.Close()
@@ -905,10 +1014,10 @@ func (s *DatabaseStorage) GetTriggerHistory(chatID int64, limit int) []AlertTrig
 	var triggers []AlertTrigger
 	for rows.Next() {
 		var trigger AlertTrigger
-		err := rows.Scan(&trigger.ID, &trigger.AlertID, &trigger.Symbol,
-			&trigger.TriggerPrice, &trigger.ChatID, &trigger.UserID, &trigger.Username, &trigger.TriggerType, &trigger.TriggeredAt)
+		err := rows.Scan(&trigger.ID, &trigger.AlertID, &trigger.Symbol, &trigger.TriggerPrice,
+			&trigger.ChatID, &trigger.UserID, &trigger.Username, &trigger.TriggerType, &trigger.TriggeredAt)
 		if err != nil {
-			logrus.WithError(err).Warn("failed to scan trigger row")
+			logrus.WithError(err).Warn("failed to scan alert trigger row")
 			continue
 		}
 		triggers = append(triggers, trigger)
@@ -917,37 +1026,28 @@ func (s *DatabaseStorage) GetTriggerHistory(chatID int64, limit int) []AlertTrig
 	return triggers
 }
 
-func (s *DatabaseStorage) GetSymbolStats() map[string]int {
-	rows, err := s.db.Query(`
-		SELECT symbol, COUNT(*) as count
-		FROM alerts 
-		WHERE symbol != ''
-		GROUP BY symbol
-		ORDER BY count DESC`)
+// GetPreferredExchangeMarketForSymbol возвращает биржу и рынок для символа из первого найденного алерта или колла
+func (s *DatabaseStorage) GetPreferredExchangeMarketForSymbol(symbol string) (string, string) {
+	// Сначала проверяем алерты
+	var exchange, market string
+	err := s.db.QueryRow(`
+		SELECT exchange, market FROM alerts 
+		WHERE symbol = ? AND exchange != '' AND market != '' 
+		LIMIT 1`, symbol).Scan(&exchange, &market)
 
-	if err != nil {
-		logrus.WithError(err).Warn("failed to get symbol stats")
-		return nil
-	}
-	defer rows.Close()
-
-	stats := make(map[string]int)
-	for rows.Next() {
-		var symbol string
-		var count int
-		if err := rows.Scan(&symbol, &count); err != nil {
-			logrus.WithError(err).Warn("failed to scan symbol stats")
-			continue
-		}
-		stats[symbol] = count
+	if err == nil && exchange != "" && market != "" {
+		return exchange, market
 	}
 
-	return stats
-}
+	// Если не нашли в алертах, проверяем открытые коллы
+	err = s.db.QueryRow(`
+		SELECT exchange, market FROM calls 
+		WHERE symbol = ? AND status = 'open' AND exchange != '' AND market != '' 
+		LIMIT 1`, symbol).Scan(&exchange, &market)
 
-func (s *DatabaseStorage) Close() error {
-	if s.db != nil {
-		return s.db.Close()
+	if err == nil && exchange != "" && market != "" {
+		return exchange, market
 	}
-	return nil
+
+	return "", ""
 }

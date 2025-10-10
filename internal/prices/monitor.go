@@ -11,15 +11,18 @@ import (
 // SymbolProvider интерфейс для получения актуального списка символов
 type SymbolProvider interface {
 	GetAllSymbols() []string
+	GetPreferredExchangeMarketForSymbol(symbol string) (string, string)
 }
 
 // PriceMonitor периодически опрашивает цены и сообщает об изменениях через callback.
 type PriceMonitor struct {
 	//Client           *http.Client // Удаляем, так как ExchangeClients уже содержит клиенты
-	ExchangeClients  *ExchangeClients // Добавляем клиентов бирж
-	SymbolProvider   SymbolProvider   // Провайдер для получения актуального списка символов
-	ThresholdPercent float64
-	Interval         time.Duration
+	ExchangeClients   *ExchangeClients // Добавляем клиентов бирж
+	SymbolProvider    SymbolProvider   // Провайдер для получения актуального списка символов
+	PreferredExchange string
+	PreferredMarket   string
+	ThresholdPercent  float64
+	Interval          time.Duration
 
 	mu          sync.Mutex
 	lastPriceBy map[string]float64
@@ -88,7 +91,14 @@ func (m *PriceMonitor) poll(onAlert func(string, float64, float64, float64)) {
 	}
 
 	for _, sym := range symbols {
-		priceInfo, err := FetchPriceInfo(m.ExchangeClients, sym)
+		// Получаем предпочтительную биржу/рынок для каждого символа из БД
+		preferredExchange := ""
+		preferredMarket := ""
+		if m.SymbolProvider != nil {
+			preferredExchange, preferredMarket = m.SymbolProvider.GetPreferredExchangeMarketForSymbol(sym)
+		}
+
+		priceInfo, err := FetchCurrentPrice(m.ExchangeClients, sym, preferredExchange, preferredMarket)
 		if err != nil {
 			logrus.WithError(err).WithField("symbol", sym).Warn("fetch price failed")
 			continue

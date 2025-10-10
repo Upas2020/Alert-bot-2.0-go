@@ -554,11 +554,81 @@ func FetchBybitHistoricalPrice(client *http.Client, symbol string, timestamp tim
 }
 
 // FetchPriceInfo получает подробную информацию о цене с изменениями за разные периоды, проверяя биржи в порядке приоритета.
-func FetchPriceInfo(clients *ExchangeClients, symbol string) (*FetchPriceInfoResult, error) {
+func FetchPriceInfo(clients *ExchangeClients, symbol string, preferredExchange, preferredMarket string) (*FetchPriceInfoResult, error) {
 	var currentPrice float64
 	var sourceExchange, sourceMarket string
 	var err error
 
+	// Если указана предпочтительная биржа/рынок, пробуем сначала получить цену оттуда
+	if preferredExchange != "" && preferredMarket != "" {
+		logrus.WithFields(logrus.Fields{
+			"symbol":    symbol,
+			"preferred": fmt.Sprintf("%s %s", preferredExchange, preferredMarket),
+		}).Debug("attempting to fetch price from preferred source")
+
+		switch preferredExchange {
+		case "Bitget":
+			if preferredMarket == "spot" {
+				currentPrice, err = fetchBitgetSpotPriceOnly(clients.BitgetClient, symbol)
+				if err == nil {
+					sourceExchange = "Bitget"
+					sourceMarket = "spot"
+				}
+			} else if preferredMarket == "futures" {
+				currentPrice, err = fetchBitgetFuturesPrice(clients.BitgetClient, symbol)
+				if err == nil {
+					sourceExchange = "Bitget"
+					sourceMarket = "futures"
+				}
+			}
+		case "Bybit":
+			if preferredMarket == "spot" {
+				currentPrice, err = FetchBybitSpotPrice(clients.BybitClient, symbol)
+				if err == nil {
+					sourceExchange = "Bybit"
+					sourceMarket = "spot"
+				}
+			} else if preferredMarket == "futures" {
+				currentPrice, err = FetchBybitFuturesPrice(clients.BybitClient, symbol)
+				if err == nil {
+					sourceExchange = "Bybit"
+					sourceMarket = "futures"
+				}
+			}
+		}
+
+		if err == nil { // Если успешно получили цену из предпочтительного источника
+			priceInfo := &PriceInfo{
+				CurrentPrice: currentPrice,
+				Source:       fmt.Sprintf("%s %s", sourceExchange, sourceMarket),
+			}
+			// Получаем исторические цены для разных периодов
+			now := time.Now()
+			// 15 минут назад
+			if price15m, err := FetchHistoricalPrice(clients, symbol, now.Add(-15*time.Minute), sourceExchange, sourceMarket); err == nil {
+				priceInfo.Change15m = calculateChangePercent(price15m, currentPrice)
+			}
+			// 1 час назад
+			if price1h, err := FetchHistoricalPrice(clients, symbol, now.Add(-1*time.Hour), sourceExchange, sourceMarket); err == nil {
+				priceInfo.Change1h = calculateChangePercent(price1h, currentPrice)
+			}
+			// 4 часа назад
+			if price4h, err := FetchHistoricalPrice(clients, symbol, now.Add(-4*time.Hour), sourceExchange, sourceMarket); err == nil {
+				priceInfo.Change4h = calculateChangePercent(price4h, currentPrice)
+			}
+			// 24 часа назад
+			if price24h, err := FetchHistoricalPrice(clients, symbol, now.Add(-24*time.Hour), sourceExchange, sourceMarket); err == nil {
+				priceInfo.Change24h = calculateChangePercent(price24h, currentPrice)
+			}
+			return &FetchPriceInfoResult{PriceInfo: *priceInfo, Exchange: sourceExchange, Market: sourceMarket}, nil
+		}
+		logrus.WithError(err).WithFields(logrus.Fields{
+			"symbol":    symbol,
+			"preferred": fmt.Sprintf("%s %s", preferredExchange, preferredMarket),
+		}).Debug("failed to fetch price from preferred source, trying all sources")
+	}
+
+	// Если нет предпочтительной биржи/рынка или она не сработала, пробуем по порядку:
 	// 1. Bitget spot
 	currentPrice, err = fetchBitgetSpotPriceOnly(clients.BitgetClient, symbol)
 	if err == nil {
@@ -692,4 +762,107 @@ func FetchHistoricalPrice(clients *ExchangeClients, symbol string, timestamp tim
 	logrus.WithError(err).WithField("symbol", symbol).Debug("Bybit futures historical price failed")
 
 	return 0, fmt.Errorf("failed to get historical price for %s from any source: %w", symbol, err)
+}
+
+// FetchCurrentPrice получает только текущую цену без исторических изменений (для мониторинга)
+func FetchCurrentPrice(clients *ExchangeClients, symbol string, preferredExchange, preferredMarket string) (*FetchPriceInfoResult, error) {
+	var currentPrice float64
+	var sourceExchange, sourceMarket string
+	var err error
+
+	// Если указана предпочтительная биржа/рынок, пробуем сначала получить цену оттуда
+	if preferredExchange != "" && preferredMarket != "" {
+		logrus.WithFields(logrus.Fields{
+			"symbol":    symbol,
+			"preferred": fmt.Sprintf("%s %s", preferredExchange, preferredMarket),
+		}).Debug("attempting to fetch price from preferred source")
+
+		switch preferredExchange {
+		case "Bitget":
+			if preferredMarket == "spot" {
+				currentPrice, err = fetchBitgetSpotPriceOnly(clients.BitgetClient, symbol)
+				if err == nil {
+					sourceExchange = "Bitget"
+					sourceMarket = "spot"
+				}
+			} else if preferredMarket == "futures" {
+				currentPrice, err = fetchBitgetFuturesPrice(clients.BitgetClient, symbol)
+				if err == nil {
+					sourceExchange = "Bitget"
+					sourceMarket = "futures"
+				}
+			}
+		case "Bybit":
+			if preferredMarket == "spot" {
+				currentPrice, err = FetchBybitSpotPrice(clients.BybitClient, symbol)
+				if err == nil {
+					sourceExchange = "Bybit"
+					sourceMarket = "spot"
+				}
+			} else if preferredMarket == "futures" {
+				currentPrice, err = FetchBybitFuturesPrice(clients.BybitClient, symbol)
+				if err == nil {
+					sourceExchange = "Bybit"
+					sourceMarket = "futures"
+				}
+			}
+		}
+
+		if err == nil {
+			return &FetchPriceInfoResult{
+				PriceInfo: PriceInfo{
+					CurrentPrice: currentPrice,
+					Source:       fmt.Sprintf("%s %s", sourceExchange, sourceMarket),
+				},
+				Exchange: sourceExchange,
+				Market:   sourceMarket,
+			}, nil
+		}
+		logrus.WithError(err).WithFields(logrus.Fields{
+			"symbol":    symbol,
+			"preferred": fmt.Sprintf("%s %s", preferredExchange, preferredMarket),
+		}).Debug("failed to fetch price from preferred source, trying all sources")
+	}
+
+	// Если нет предпочтительной биржи/рынка или она не сработала, пробуем по порядку
+	currentPrice, err = fetchBitgetSpotPriceOnly(clients.BitgetClient, symbol)
+	if err == nil {
+		sourceExchange = "Bitget"
+		sourceMarket = "spot"
+	} else {
+		logrus.WithError(err).WithField("symbol", symbol).Debug("Bitget spot price fetch failed, trying Bitget futures")
+
+		currentPrice, err = fetchBitgetFuturesPrice(clients.BitgetClient, symbol)
+		if err == nil {
+			sourceExchange = "Bitget"
+			sourceMarket = "futures"
+		} else {
+			logrus.WithError(err).WithField("symbol", symbol).Debug("Bitget futures price fetch failed, trying Bybit spot")
+
+			currentPrice, err = FetchBybitSpotPrice(clients.BybitClient, symbol)
+			if err == nil {
+				sourceExchange = "Bybit"
+				sourceMarket = "spot"
+			} else {
+				logrus.WithError(err).WithField("symbol", symbol).Debug("Bybit spot price fetch failed, trying Bybit futures")
+
+				currentPrice, err = FetchBybitFuturesPrice(clients.BybitClient, symbol)
+				if err == nil {
+					sourceExchange = "Bybit"
+					sourceMarket = "futures"
+				} else {
+					return nil, fmt.Errorf("failed to get current price for %s from any source: %w", symbol, err)
+				}
+			}
+		}
+	}
+
+	return &FetchPriceInfoResult{
+		PriceInfo: PriceInfo{
+			CurrentPrice: currentPrice,
+			Source:       fmt.Sprintf("%s %s", sourceExchange, sourceMarket),
+		},
+		Exchange: sourceExchange,
+		Market:   sourceMarket,
+	}, nil
 }
