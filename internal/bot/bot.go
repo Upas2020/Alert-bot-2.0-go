@@ -401,16 +401,6 @@ func (b *TelegramBot) cmdCloseCall(ctx context.Context, chatID int64, userID int
 	}
 
 	callID := parts[1]
-	size := 100.0 // По умолчанию закрываем полностью
-
-	if len(parts) == 3 {
-		sizeVal, err := strconv.ParseFloat(parts[2], 64)
-		if err != nil || sizeVal <= 0 || sizeVal > 100 {
-			b.reply(chatID, "Неверное значение размера. Используйте число от 1 до 100.")
-			return
-		}
-		size = sizeVal
-	}
 
 	// Получаем информацию о колле из БД
 	call, err := b.st.GetCallByID(callID, userID)
@@ -422,6 +412,17 @@ func (b *TelegramBot) cmdCloseCall(ctx context.Context, chatID int64, userID int
 	if call.Status != "open" {
 		b.reply(chatID, "Колл уже закрыт")
 		return
+	}
+
+	size := call.Size
+
+	if len(parts) == 3 {
+		sizeVal, err := strconv.ParseFloat(parts[2], 64)
+		if err != nil || sizeVal <= 0 || sizeVal > call.Size {
+			b.reply(chatID, fmt.Sprintf("Неверное значение размера. Используйте число от 1 до текущего размера %.0f.", call.Size))
+			return
+		}
+		size = sizeVal
 	}
 
 	// Получаем текущую цену для символа из колла

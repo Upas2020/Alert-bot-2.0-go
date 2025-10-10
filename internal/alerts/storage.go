@@ -199,7 +199,11 @@ func (s *DatabaseStorage) migrate() error {
 		`ALTER TABLE calls ADD COLUMN deposit_percent REAL DEFAULT 0`,
 		`ALTER TABLE calls ADD COLUMN stop_loss_price REAL DEFAULT 0`,
 	}
-
+	// Обновляем старые коллы без size
+	_, err := s.db.Exec(`UPDATE calls SET size = 100 WHERE size IS NULL OR size = 0`)
+	if err != nil {
+		logrus.WithError(err).Warn("failed to update old calls with default size")
+	}
 	for _, query := range queries {
 		if _, err := s.db.Exec(query); err != nil {
 			// Игнорируем ошибки добавления колонок если они уже существуют
