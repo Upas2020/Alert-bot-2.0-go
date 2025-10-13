@@ -243,9 +243,9 @@ func (b *TelegramBot) cmdOpenCall(ctx context.Context, chatID int64, userID int6
 	}
 
 	symbol := formatSymbol(parts[1])
-	direction := "long"   // по умолчанию
-	depositPercent := 0.0 // по умолчанию 0%
-	stopLossPrice := 0.0  // по умолчанию 0 (без стоп-лосса)
+	direction := "long"  // по умолчанию
+	positionSize := 0.0  // по умолчанию 0%
+	stopLossPrice := 0.0 // по умолчанию 0 (без стоп-лосса)
 
 	// Парсинг направления, процента депозита и стоп-лосса
 	argIndex := 2
@@ -264,7 +264,7 @@ func (b *TelegramBot) cmdOpenCall(ctx context.Context, chatID int64, userID int6
 		sizeValStr := parts[argIndex]
 		sizeVal, err := strconv.ParseFloat(sizeValStr, 64)
 		if err == nil && sizeVal >= 0 {
-			depositPercent = sizeVal
+			positionSize = sizeVal
 			argIndex++
 		}
 	}
@@ -303,8 +303,8 @@ func (b *TelegramBot) cmdOpenCall(ctx context.Context, chatID int64, userID int6
 		Direction:      direction,
 		EntryPrice:     priceInfo.CurrentPrice,
 		Market:         priceInfo.Market,
-		DepositPercent: depositPercent, // Сохраняем процент от депозита
-		StopLossPrice:  stopLossPrice,  // Сохраняем цену стоп-лосса
+		DepositPercent: positionSize,  // Сохраняем процент от депозита
+		StopLossPrice:  stopLossPrice, // Сохраняем цену стоп-лосса
 		Exchange:       priceInfo.Exchange,
 	}
 
@@ -472,7 +472,7 @@ func (b *TelegramBot) cmdCloseCall(ctx context.Context, chatID int64, userID int
 
 // cmdMyCalls показывает активные коллы пользователя
 func (b *TelegramBot) cmdMyCalls(ctx context.Context, chatID int64, userID int64) {
-	calls := b.st.GetUserCalls(userID, true) // только открытые
+	calls := b.st.GetUserCalls(userID, true)
 	if len(calls) == 0 {
 		b.reply(chatID, "У вас нет активных коллов")
 		return
@@ -481,7 +481,7 @@ func (b *TelegramBot) cmdMyCalls(ctx context.Context, chatID int64, userID int64
 	var msg strings.Builder
 	msg.WriteString("Ваши активные коллы:\n\n")
 
-	var totalDepositPercent float64
+	var totalPositionSize float64
 	var totalPnlToDeposit float64
 
 	for i, call := range calls {
@@ -489,52 +489,74 @@ func (b *TelegramBot) cmdMyCalls(ctx context.Context, chatID int64, userID int64
 		if call.Direction == "short" {
 			directionRus = "Short"
 		}
-		// Получаем текущую цену для расчета текущего PnL
-		priceInfo, err := prices.FetchPriceInfo(b.pricesClients, call.Symbol, call.Exchange, call.Market)
+
+		priceInfo, err := prices.FetchCurrentPrice(b.pricesClients, call.Symbol, call.Exchange, call.Market)
 		if err != nil {
 			logrus.WithError(err).WithField("symbol", call.Symbol).Warn("failed to get current price for call")
-			// Если не можем получить текущую цену, используем цену входа для расчета PnL
-			// (или, возможно, 0, чтобы показать ошибку или устаревшие данные)
-			// В данном случае, продолжим, чтобы показать остальные коллы.
 			msg.WriteString(fmt.Sprintf("%d. %s (%s) - ID: `%s` (ошибка цены)\n\n", i+1, call.Symbol, directionRus, call.ID))
 			continue
 		}
 		currentPrice := priceInfo.CurrentPrice
 
-		// Вычисляем текущий PnL
-		var currentPnl float64
+		// Базовое изменение цены
+		var basePnl float64
 		if call.Direction == "long" {
-			currentPnl = ((currentPrice - call.EntryPrice) / call.EntryPrice) * 100
+			basePnl = ((currentPrice - call.EntryPrice) / call.EntryPrice) * 100
 		} else {
-			currentPnl = ((call.EntryPrice - currentPrice) / call.EntryPrice) * 100
+			basePnl = ((call.EntryPrice - currentPrice) / call.EntryPrice) * 100
 		}
 
+		// Вклад в депозит
+		pnlToDeposit := call.DepositPercent * (basePnl / 100)
+
 		pnlSign := "+"
-		if currentPnl < 0 {
+		if basePnl < 0 {
 			pnlSign = ""
 		}
 
 		msg.WriteString(fmt.Sprintf("%d. %s (%s) - ID: `%s`\n", i+1, call.Symbol, directionRus, call.ID))
 		msg.WriteString(fmt.Sprintf("   Цена входа: %s\n", prices.FormatPrice(call.EntryPrice)))
 		msg.WriteString(fmt.Sprintf("   Биржа: %s, Рынок: %s\n", call.Exchange, call.Market))
+
 		if call.Size < 100 {
-			msg.WriteString(fmt.Sprintf("   Открытый размер: %.0f\n", call.Size))
+			msg.WriteString(fmt.Sprintf("   Открытый размер: %.0f%%\n", call.Size))
 		}
+
 		if call.DepositPercent > 0 {
-			msg.WriteString(fmt.Sprintf("   %% от депозита: %.0f%%\n", call.DepositPercent))
-			totalDepositPercent += call.DepositPercent
-			totalPnlToDeposit += (currentPnl / 100) * call.DepositPercent
+			posInfo := fmt.Sprintf("   Размер позиции: %.0f%%", call.DepositPercent)
+			if call.DepositPercent > 100 {
+				leverage := call.DepositPercent / 100
+				posInfo += fmt.Sprintf(" (~x%.1f)", leverage)
+			}
+			msg.WriteString(posInfo + "\n")
+
+			totalPositionSize += call.DepositPercent
+			totalPnlToDeposit += pnlToDeposit
 		}
+
 		msg.WriteString(fmt.Sprintf("   Текущая цена: %s\n", prices.FormatPrice(currentPrice)))
-		msg.WriteString(fmt.Sprintf("   Текущий PnL: %s%.2f%%\n\n", pnlSign, currentPnl))
+		msg.WriteString(fmt.Sprintf("   PnL цены: %s%.2f%%\n", pnlSign, basePnl))
+
+		pnlDepositSign := "+"
+		if pnlToDeposit < 0 {
+			pnlDepositSign = ""
+		}
+		msg.WriteString(fmt.Sprintf("   Вклад в депозит: %s%.2f%%\n", pnlDepositSign, pnlToDeposit))
 
 		if call.StopLossPrice > 0 {
 			msg.WriteString(fmt.Sprintf("   Стоп-лосс: %s\n", prices.FormatPrice(call.StopLossPrice)))
 		}
+		msg.WriteString("\n")
 	}
 
-	if totalDepositPercent > 0 {
-		msg.WriteString(fmt.Sprintf("\n*Совокупный %% от депозита в сделках: %.0f%%*\n", totalDepositPercent))
+	if totalPositionSize > 0 {
+		posInfo := fmt.Sprintf("*Совокупный размер позиций: %.0f%%*", totalPositionSize)
+		if totalPositionSize > 100 {
+			avgLeverage := totalPositionSize / 100
+			posInfo += fmt.Sprintf(" *(~x%.1f)*", avgLeverage)
+		}
+		msg.WriteString(posInfo + "\n")
+
 		pnlToDepositSign := "+"
 		if totalPnlToDeposit < 0 {
 			pnlToDepositSign = ""
@@ -549,33 +571,36 @@ func (b *TelegramBot) cmdMyCalls(ctx context.Context, chatID int64, userID int64
 func (b *TelegramBot) cmdCallStats(chatID int64) {
 	stats := b.st.GetAllUserStats()
 
-	// Получаем все активные коллы для расчета текущего процента от депозита и PnL к депозиту
+	// Получаем все активные коллы для расчета текущего размера позиций и PnL
 	activeCalls := b.st.GetAllOpenCalls()
 	activeStatsMap := make(map[int64]struct {
-		TotalActiveDepositPercent float64
-		TotalPnlToDeposit         float64
-	}) // Map для временного хранения активной статистики по пользователям
+		TotalPositionSize float64
+		TotalPnlToDeposit float64
+	})
 
 	for _, call := range activeCalls {
 		if call.DepositPercent > 0 {
-			preferredExchange, preferredMarket := b.getPreferredExchangeMarketForSymbol(call.Symbol)
-			priceInfo, err := prices.FetchPriceInfo(b.pricesClients, call.Symbol, preferredExchange, preferredMarket)
+			priceInfo, err := prices.FetchCurrentPrice(b.pricesClients, call.Symbol, call.Exchange, call.Market)
 			if err != nil {
 				logrus.WithError(err).WithField("symbol", call.Symbol).Warn("failed to get current price for active call stats in cmdCallStats")
 				continue
 			}
 			currentPrice := priceInfo.CurrentPrice
 
-			var currentPnl float64
+			// Базовое изменение цены
+			var basePnl float64
 			if call.Direction == "long" {
-				currentPnl = ((currentPrice - call.EntryPrice) / call.EntryPrice) * 100
-			} else { // short
-				currentPnl = ((call.EntryPrice - currentPrice) / call.EntryPrice) * 100
+				basePnl = ((currentPrice - call.EntryPrice) / call.EntryPrice) * 100
+			} else {
+				basePnl = ((call.EntryPrice - currentPrice) / call.EntryPrice) * 100
 			}
 
+			// Вклад в депозит = размер_позиции × изменение_цены
+			pnlToDeposit := call.DepositPercent * (basePnl / 100)
+
 			userActiveStats := activeStatsMap[call.UserID]
-			userActiveStats.TotalActiveDepositPercent += call.DepositPercent
-			userActiveStats.TotalPnlToDeposit += (currentPnl / 100) * call.DepositPercent
+			userActiveStats.TotalPositionSize += call.DepositPercent
+			userActiveStats.TotalPnlToDeposit += pnlToDeposit
 			activeStatsMap[call.UserID] = userActiveStats
 		}
 	}
@@ -583,12 +608,12 @@ func (b *TelegramBot) cmdCallStats(chatID int64) {
 	// Обновляем статистику пользователей из БД с активной статистикой
 	for i := range stats {
 		if active, ok := activeStatsMap[stats[i].UserID]; ok {
-			stats[i].TotalActiveDepositPercent = active.TotalActiveDepositPercent
+			stats[i].TotalActiveDepositPercent = active.TotalPositionSize
 			stats[i].TotalPnlToDeposit = active.TotalPnlToDeposit
 		}
 	}
 
-	// Добавляем пользователей, у которых есть только активные коллы, но нет закрытых за 90 дней
+	// Добавляем пользователей, у которых есть только активные коллы
 	for userID, active := range activeStatsMap {
 		found := false
 		for _, stat := range stats {
@@ -598,7 +623,6 @@ func (b *TelegramBot) cmdCallStats(chatID int64) {
 			}
 		}
 		if !found {
-			// Пытаемся получить username, если его нет в активных коллах
 			var username string
 			for _, call := range activeCalls {
 				if call.UserID == userID {
@@ -609,48 +633,83 @@ func (b *TelegramBot) cmdCallStats(chatID int64) {
 			if username == "" {
 				username = fmt.Sprintf("User_%d", userID)
 			}
+
+			// Получаем депозит для нового пользователя
+			initialDeposit, currentDeposit, _ := b.st.GetUserDeposit(userID)
+
 			stats = append(stats, alerts.UserStats{
 				UserID:                    userID,
 				Username:                  username,
-				TotalActiveDepositPercent: active.TotalActiveDepositPercent,
+				TotalActiveDepositPercent: active.TotalPositionSize,
 				TotalPnlToDeposit:         active.TotalPnlToDeposit,
+				InitialDeposit:            initialDeposit,
+				CurrentDeposit:            currentDeposit,
+				TotalReturnPercent:        ((currentDeposit - initialDeposit) / initialDeposit) * 100,
 			})
 		}
 	}
 
-	// Сортируем статистику по TotalPnlToDeposit (если есть), иначе по TotalPnl
+	// Сортируем по доходности депозита
 	sort.Slice(stats, func(i, j int) bool {
+		// Приоритет: если есть доходность депозита, сортируем по ней
+		if stats[i].TotalReturnPercent != 0 || stats[j].TotalReturnPercent != 0 {
+			return stats[i].TotalReturnPercent > stats[j].TotalReturnPercent
+		}
+		// Если нет доходности депозита, сортируем по текущему PnL активных позиций
 		if stats[i].TotalPnlToDeposit != 0 || stats[j].TotalPnlToDeposit != 0 {
 			return stats[i].TotalPnlToDeposit > stats[j].TotalPnlToDeposit
 		}
+		// Иначе по закрытому PnL
 		return stats[i].TotalPnl > stats[j].TotalPnl
 	})
 
 	var msg strings.Builder
-	msg.WriteString("📊 *Рейтинг трейдеров за последние 90 дней (включая активные сделки):*\n\n")
+	msg.WriteString("📊 *Рейтинг трейдеров за последние 90 дней:*\n\n")
 
 	for i, stat := range stats {
-		pnlSign := "+"
-		if stat.TotalPnl < 0 {
-			pnlSign = ""
-		}
-
 		username := stat.Username
 		if username == "" {
 			username = fmt.Sprintf("User_%d", stat.UserID)
 		}
 
 		msg.WriteString(fmt.Sprintf("%d. *%s*\n", i+1, username))
-		msg.WriteString(fmt.Sprintf("   💰 Закрытый PnL: %s%.2f%% | 🎯 Winrate: %.1f%% | 📊 Сделок: %d\n",
-			pnlSign, stat.TotalPnl, stat.WinRate, stat.ClosedCalls))
 
+		// Показываем доходность депозита, если есть данные
+		if stat.InitialDeposit > 0 && stat.CurrentDeposit > 0 {
+			returnSign := "+"
+			if stat.TotalReturnPercent < 0 {
+				returnSign = ""
+			}
+			msg.WriteString(fmt.Sprintf("   💰 Доходность депозита: %s%.2f%% (%.0f → %.0f)\n",
+				returnSign, stat.TotalReturnPercent, stat.InitialDeposit, stat.CurrentDeposit))
+		}
+
+		// Закрытые сделки
+		if stat.ClosedCalls > 0 {
+			pnlSign := "+"
+			if stat.TotalPnl < 0 {
+				pnlSign = ""
+			}
+			msg.WriteString(fmt.Sprintf("   📊 Закрытых: %d | PnL: %s%.2f%% | Winrate: %.1f%%\n",
+				stat.ClosedCalls, pnlSign, stat.TotalPnl, stat.WinRate))
+		}
+
+		// Активные позиции
 		if stat.TotalActiveDepositPercent > 0 {
 			pnlToDepositSign := "+"
 			if stat.TotalPnlToDeposit < 0 {
 				pnlToDepositSign = ""
 			}
-			msg.WriteString(fmt.Sprintf("   💼 %% от депозита (активные): %.0f%% | 📈 PnL к депозиту (активные): %s%.2f%%\n",
-				stat.TotalActiveDepositPercent, pnlToDepositSign, stat.TotalPnlToDeposit))
+
+			// Показываем размер позиций и плечо если > 100%
+			positionInfo := fmt.Sprintf("%.0f%%", stat.TotalActiveDepositPercent)
+			if stat.TotalActiveDepositPercent > 100 {
+				avgLeverage := stat.TotalActiveDepositPercent / 100
+				positionInfo = fmt.Sprintf("%.0f%% (~x%.1f)", stat.TotalActiveDepositPercent, avgLeverage)
+			}
+
+			msg.WriteString(fmt.Sprintf("   💼 Позиции: %s | PnL: %s%.2f%%\n",
+				positionInfo, pnlToDepositSign, stat.TotalPnlToDeposit))
 		}
 		msg.WriteString("\n")
 	}
@@ -666,31 +725,37 @@ func (b *TelegramBot) cmdMyCallStats(chatID int64, userID int64) {
 		return
 	}
 
-	// Получаем активные коллы для расчета текущего процента от депозита и PnL к депозиту
+	// Получаем активные коллы
 	activeCalls := b.st.GetUserCalls(userID, true)
-	var totalActiveDepositPercent float64
-	var totalCurrentPnlToDeposit float64
+	var totalPositionSize float64
+	var totalPnlToDeposit float64
 
 	for _, call := range activeCalls {
 		if call.DepositPercent > 0 {
-			preferredExchange, preferredMarket := b.getPreferredExchangeMarketForSymbol(call.Symbol)
-			priceInfo, err := prices.FetchPriceInfo(b.pricesClients, call.Symbol, preferredExchange, preferredMarket)
+			priceInfo, err := prices.FetchCurrentPrice(b.pricesClients, call.Symbol, call.Exchange, call.Market)
 			if err != nil {
 				logrus.WithError(err).WithField("symbol", call.Symbol).Warn("failed to get current price for active call stats")
 				continue
 			}
 			currentPrice := priceInfo.CurrentPrice
 
-			var currentPnl float64
+			var basePnl float64
 			if call.Direction == "long" {
-				currentPnl = ((currentPrice - call.EntryPrice) / call.EntryPrice) * 100
+				basePnl = ((currentPrice - call.EntryPrice) / call.EntryPrice) * 100
 			} else {
-				currentPnl = ((call.EntryPrice - currentPrice) / call.EntryPrice) * 100
+				basePnl = ((call.EntryPrice - currentPrice) / call.EntryPrice) * 100
 			}
 
-			totalActiveDepositPercent += call.DepositPercent
-			totalCurrentPnlToDeposit += (currentPnl / 100) * call.DepositPercent
+			pnlToDeposit := call.DepositPercent * (basePnl / 100)
+			totalPositionSize += call.DepositPercent
+			totalPnlToDeposit += pnlToDeposit
 		}
+	}
+
+	// Получаем информацию о депозите
+	initialDeposit, currentDeposit, err := b.st.GetUserDeposit(userID)
+	if err != nil {
+		logrus.WithError(err).Warn("failed to get user deposit")
 	}
 
 	if stats.ClosedCalls == 0 && len(activeCalls) == 0 {
@@ -701,57 +766,74 @@ func (b *TelegramBot) cmdMyCallStats(chatID int64, userID int64) {
 	var msg strings.Builder
 	msg.WriteString("📊 *Ваша статистика коллов за последние 90 дней:*\n\n")
 
-	// Общий PnL (только для закрытых коллов)
-	pnlSign := "+"
-	if stats.TotalPnl < 0 {
-		pnlSign = ""
+	// Доходность депозита
+	if initialDeposit > 0 && currentDeposit > 0 {
+		totalReturn := ((currentDeposit - initialDeposit) / initialDeposit) * 100
+		returnSign := "+"
+		if totalReturn < 0 {
+			returnSign = ""
+		}
+		msg.WriteString(fmt.Sprintf("💰 *Доходность депозита: %s%.2f%%*\n", returnSign, totalReturn))
+		msg.WriteString(fmt.Sprintf("   Начальный: %.0f | Текущий: %.0f\n\n", initialDeposit, currentDeposit))
 	}
-	msg.WriteString(fmt.Sprintf("💰 *Совокупный PnL (закрытые):* %s%.2f%%\n", pnlSign, stats.TotalPnl))
 
-	// Средний PnL (только для закрытых коллов)
-	avgPnlSign := "+"
-	if stats.AveragePnl < 0 {
-		avgPnlSign = ""
+	// Закрытые сделки
+	if stats.ClosedCalls > 0 {
+		pnlSign := "+"
+		if stats.TotalPnl < 0 {
+			pnlSign = ""
+		}
+		msg.WriteString(fmt.Sprintf("📈 *Закрытые сделки:*\n"))
+		msg.WriteString(fmt.Sprintf("   Всего: %d | Winrate: %.1f%%\n", stats.ClosedCalls, stats.WinRate))
+		msg.WriteString(fmt.Sprintf("   Общий PnL: %s%.2f%%\n", pnlSign, stats.TotalPnl))
+
+		avgPnlSign := "+"
+		if stats.AveragePnl < 0 {
+			avgPnlSign = ""
+		}
+		msg.WriteString(fmt.Sprintf("   Средний PnL: %s%.2f%%\n\n", avgPnlSign, stats.AveragePnl))
 	}
-	msg.WriteString(fmt.Sprintf("📈 *Средний PnL (закрытые):* %s%.2f%%\n", avgPnlSign, stats.AveragePnl))
 
-	// Winrate (только для закрытых коллов)
-	msg.WriteString(fmt.Sprintf("🎯 *Winrate (закрытые):* %.1f%% (%d/%d)\n",
-		stats.WinRate, stats.WinningCalls, stats.ClosedCalls))
+	// Активные позиции
+	msg.WriteString(fmt.Sprintf("📊 *Активных коллов:* %d\n", len(activeCalls)))
 
-	// Общая статистика
-	msg.WriteString(fmt.Sprintf("📋 *Всего коллов (открыто/закрыто):* %d/%d\n", stats.TotalCalls, stats.ClosedCalls))
-	// msg.WriteString(fmt.Sprintf("📊 *Активных коллов:* %d\n\n", stats.TotalCalls-stats.ClosedCalls))
-	msg.WriteString(fmt.Sprintf("📊 *Активных коллов:* %d\n\n", len(activeCalls)))
+	if totalPositionSize > 0 {
+		msg.WriteString(fmt.Sprintf("\n💼 *Активные позиции:*\n"))
 
-	// Информация по активным позициям
-	if totalActiveDepositPercent > 0 {
-		msg.WriteString(fmt.Sprintf("*\n*Совокупный %% от депозита в активных сделках: %.0f%%*\n", totalActiveDepositPercent))
+		positionInfo := fmt.Sprintf("   Размер: %.0f%%", totalPositionSize)
+		if totalPositionSize > 100 {
+			avgLeverage := totalPositionSize / 100
+			positionInfo += fmt.Sprintf(" (~x%.1f плечо)", avgLeverage)
+		}
+		msg.WriteString(positionInfo + "\n")
+
 		pnlToDepositSign := "+"
-		if totalCurrentPnlToDeposit < 0 {
+		if totalPnlToDeposit < 0 {
 			pnlToDepositSign = ""
 		}
-		msg.WriteString(fmt.Sprintf("*Совокупный PnL к депозиту (активные): %s%.2f%%*\n", pnlToDepositSign, totalCurrentPnlToDeposit))
+		msg.WriteString(fmt.Sprintf("   Текущий PnL: %s%.2f%%\n", pnlToDepositSign, totalPnlToDeposit))
+	}
+
+	// Лучший и худший коллы
+	if stats.ClosedCalls > 0 {
 		msg.WriteString("\n")
-	}
+		bestCall, worstCall := b.st.GetBestWorstCallsForUser(userID)
 
-	// Лучший и худший коллы с деталями (для закрытых коллов)
-	bestCall, worstCall := b.st.GetBestWorstCallsForUser(userID)
-
-	if bestCall != nil {
-		directionRus := "Long"
-		if bestCall.Direction == "short" {
-			directionRus = "Short"
+		if bestCall != nil {
+			directionRus := "Long"
+			if bestCall.Direction == "short" {
+				directionRus = "Short"
+			}
+			msg.WriteString(fmt.Sprintf("🚀 *Лучший колл:* +%.2f%% (%s %s)\n", bestCall.PnlPercent, bestCall.Symbol, directionRus))
 		}
-		msg.WriteString(fmt.Sprintf("🚀 *Лучший колл:* +%.2f%% (%s %s)\n", bestCall.PnlPercent, bestCall.Symbol, directionRus))
-	}
 
-	if worstCall != nil {
-		directionRus := "Long"
-		if worstCall.Direction == "short" {
-			directionRus = "Short"
+		if worstCall != nil {
+			directionRus := "Long"
+			if worstCall.Direction == "short" {
+				directionRus = "Short"
+			}
+			msg.WriteString(fmt.Sprintf("💥 *Худший колл:* %.2f%% (%s %s)\n", worstCall.PnlPercent, worstCall.Symbol, directionRus))
 		}
-		msg.WriteString(fmt.Sprintf("💥 *Худший колл:* %.2f%% (%s %s)\n", worstCall.PnlPercent, worstCall.Symbol, directionRus))
 	}
 
 	b.reply(chatID, msg.String())

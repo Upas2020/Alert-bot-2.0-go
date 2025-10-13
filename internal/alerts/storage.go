@@ -77,8 +77,11 @@ type UserStats struct {
 	WinRate                   float64 `json:"win_rate"`
 	BestCall                  float64 `json:"best_call"`
 	WorstCall                 float64 `json:"worst_call"`
-	TotalActiveDepositPercent float64 `json:"total_active_deposit_percent"` // Совокупный % от депозита в активных сделках
-	TotalPnlToDeposit         float64 `json:"total_pnl_to_deposit"`         // Совокупный PnL к депозиту (для активных сделок)
+	TotalActiveDepositPercent float64 `json:"total_active_deposit_percent"`
+	TotalPnlToDeposit         float64 `json:"total_pnl_to_deposit"`
+	InitialDeposit            float64 `json:"initial_deposit"`
+	CurrentDeposit            float64 `json:"current_deposit"`
+	TotalReturnPercent        float64 `json:"total_return_percent"`
 }
 
 type DatabaseStorage struct {
@@ -132,6 +135,14 @@ func (s *DatabaseStorage) migrate() error {
 			market TEXT DEFAULT '',
 			exchange TEXT DEFAULT ''
 		)`,
+		`CREATE TABLE IF NOT EXISTS user_deposits (
+    		user_id INTEGER PRIMARY KEY,
+    		initial_deposit REAL DEFAULT 100,
+    		current_deposit REAL DEFAULT 100,
+    		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_user_deposits_user_id ON user_deposits(user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_alerts_chat_id ON alerts(chat_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_alerts_user_id ON alerts(user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_alerts_symbol ON alerts(symbol)`,
@@ -273,6 +284,70 @@ func (s *DatabaseStorage) Update(alert Alert) error {
 	return err
 }
 
+// GetUserDeposit получает информацию о депозите пользователя
+func (s *DatabaseStorage) GetUserDeposit(userID int64) (initialDeposit, currentDeposit float64, err error) {
+	err = s.db.QueryRow(`
+		SELECT initial_deposit, current_deposit 
+		FROM user_deposits 
+		WHERE user_id = ?`, userID).Scan(&initialDeposit, &currentDeposit)
+
+	if err == sql.ErrNoRows {
+		// Если депозит не найден, создаем новый с начальным значением 100
+		_, err = s.db.Exec(`
+			INSERT INTO user_deposits (user_id, initial_deposit, current_deposit) 
+			VALUES (?, 100, 100)`, userID)
+		if err != nil {
+			return 0, 0, err
+		}
+		return 100, 100, nil
+	}
+
+	return initialDeposit, currentDeposit, err
+}
+
+// UpdateUserDeposit обновляет текущий депозит пользователя
+func (s *DatabaseStorage) UpdateUserDeposit(userID int64, newDeposit float64) error {
+	// Сначала проверяем, существует ли запись
+	var exists bool
+	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM user_deposits WHERE user_id = ?)`, userID).Scan(&exists)
+	if err != nil {
+		return err
+	}
+
+	if !exists {
+		// Создаем запись, если её нет
+		_, err = s.db.Exec(`
+			INSERT INTO user_deposits (user_id, initial_deposit, current_deposit) 
+			VALUES (?, 100, ?)`, userID, newDeposit)
+	} else {
+		// Обновляем существующую
+		_, err = s.db.Exec(`
+			UPDATE user_deposits 
+			SET current_deposit = ?, updated_at = CURRENT_TIMESTAMP 
+			WHERE user_id = ?`, newDeposit, userID)
+	}
+
+	if err != nil {
+		return err
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"user_id":         userID,
+		"current_deposit": newDeposit,
+	}).Debug("user deposit updated")
+
+	return nil
+}
+
+// ResetUserDeposit сбрасывает депозит пользователя до начального значения
+func (s *DatabaseStorage) ResetUserDeposit(userID int64) error {
+	_, err := s.db.Exec(`
+		UPDATE user_deposits 
+		SET current_deposit = initial_deposit, updated_at = CURRENT_TIMESTAMP 
+		WHERE user_id = ?`, userID)
+
+	return err
+}
 func (s *DatabaseStorage) ListByChat(chatID int64) []Alert {
 	rows, err := s.db.Query(`
 		SELECT id, chat_id, COALESCE(user_id, 0), COALESCE(username, ''), symbol, market, target_price, target_percent, base_price, created_at, exchange
@@ -469,12 +544,13 @@ func (s *DatabaseStorage) OpenCall(call Call) (Call, error) {
 	}
 
 	logrus.WithFields(logrus.Fields{
-		"call_id":     call.ID,
-		"user_id":     call.UserID,
-		"username":    call.Username,
-		"symbol":      call.Symbol,
-		"direction":   call.Direction,
-		"entry_price": call.EntryPrice,
+		"call_id":       call.ID,
+		"user_id":       call.UserID,
+		"username":      call.Username,
+		"symbol":        call.Symbol,
+		"direction":     call.Direction,
+		"entry_price":   call.EntryPrice,
+		"position_size": call.DepositPercent,
 	}).Info("call opened")
 
 	return call, nil
@@ -502,17 +578,55 @@ func (s *DatabaseStorage) CloseCall(callID string, userID int64, exitPrice float
 		return fmt.Errorf("неверный размер для закрытия. Должен быть от 0 до текущего размера %.2f", call.Size)
 	}
 
-	// Вычисляем PnL в зависимости от направления для закрываемой части
-	// PnL для закрытой части рассчитывается как обычно
-	var pnlPercentForClosedPart float64
+	// Вычисляем базовый PnL (изменение цены в процентах)
+	var basePnlPercent float64
 	if call.Direction == "long" {
-		pnlPercentForClosedPart = ((exitPrice - call.EntryPrice) / call.EntryPrice) * 100
+		basePnlPercent = ((exitPrice - call.EntryPrice) / call.EntryPrice) * 100
 	} else { // short
-		pnlPercentForClosedPart = ((call.EntryPrice - exitPrice) / call.EntryPrice) * 100
+		basePnlPercent = ((call.EntryPrice - exitPrice) / call.EntryPrice) * 100
+	}
+
+	// PnL для закрываемой части позиции
+	// Размер позиции учитывается в изменении депозита
+	pnlPercentForClosedPart := basePnlPercent
+
+	// Рассчитываем изменение депозита
+	if call.DepositPercent > 0 {
+		_, currentDeposit, err := s.GetUserDeposit(userID)
+		if err != nil {
+			logrus.WithError(err).Warn("failed to get user deposit for PnL calculation")
+		} else {
+			// Вычисляем, какая часть позиции закрывается
+			closedPositionPercent := call.DepositPercent * (sizeToClose / call.Size)
+
+			// Изменение депозита = размер_позиции × изменение_цены
+			// Например: позиция 200%, цена +10% → депозит +20%
+			depositChangePercent := closedPositionPercent * (basePnlPercent / 100)
+			depositChange := (depositChangePercent / 100) * currentDeposit
+
+			newDeposit := currentDeposit + depositChange
+
+			// Обновляем депозит пользователя
+			err = s.UpdateUserDeposit(userID, newDeposit)
+			if err != nil {
+				logrus.WithError(err).Warn("failed to update user deposit after closing call")
+			} else {
+				logrus.WithFields(logrus.Fields{
+					"user_id":               userID,
+					"call_id":               callID,
+					"closed_position_pct":   closedPositionPercent,
+					"base_pnl_pct":          basePnlPercent,
+					"deposit_change_pct":    depositChangePercent,
+					"deposit_change_amount": depositChange,
+					"old_deposit":           currentDeposit,
+					"new_deposit":           newDeposit,
+				}).Info("user deposit updated after call close")
+			}
+		}
 	}
 
 	newSize := call.Size - sizeToClose
-	newDepositPercent := call.DepositPercent * (newSize / call.Size) // Пропорционально уменьшаем DepositPercent
+	newDepositPercent := call.DepositPercent * (newSize / call.Size)
 	status := "open"
 	var closedAt sql.NullTime
 
@@ -521,13 +635,11 @@ func (s *DatabaseStorage) CloseCall(callID string, userID int64, exitPrice float
 		status = "closed"
 		now := time.Now()
 		closedAt = sql.NullTime{Time: now, Valid: true}
-		newSize = 0.0           // Устанавливаем в 0 для полного закрытия
-		newDepositPercent = 0.0 // Если колл закрыт, то процент депозита тоже 0
+		newSize = 0.0
+		//newDepositPercent = 0.0
 	}
 
 	// Обновляем колл в базе данных
-	// exit_price и pnl_percent будут относиться к последней операции закрытия
-	// size будет оставшимся размером
 	_, err = s.db.Exec(`
 		UPDATE calls
 		SET exit_price = ?, pnl_percent = ?, size = ?, status = ?, closed_at = ?, deposit_percent = ?
@@ -672,7 +784,7 @@ func (s *DatabaseStorage) GetUserStats(userID int64) (*UserStats, error) {
 			COALESCE(MAX(CASE WHEN status = 'closed' THEN pnl_percent ELSE NULL END), 0) as best_call,
 			COALESCE(MIN(CASE WHEN status = 'closed' THEN pnl_percent ELSE NULL END), 0) as worst_call
 		FROM calls 
-		WHERE user_id = ? AND opened_at >= datetime('now', '-90 days')
+		WHERE user_id = ? AND opened_at >= datetime('now', '-90 days') and deposit_percent > 0
 		GROUP BY user_id, username`,
 		userID).Scan(
 		&stats.UserID, &stats.Username, &stats.TotalCalls, &stats.ClosedCalls,
@@ -707,7 +819,7 @@ func (s *DatabaseStorage) GetAllUserStats() []UserStats {
 			COALESCE(MAX(CASE WHEN status = 'closed' THEN pnl_percent ELSE NULL END), 0) as best_call,
 			COALESCE(MIN(CASE WHEN status = 'closed' THEN pnl_percent ELSE NULL END), 0) as worst_call
 		FROM calls 
-		WHERE opened_at >= datetime('now', '-90 days')
+		WHERE opened_at >= datetime('now', '-90 days') and deposit_percent >0
 		GROUP BY user_id, username
 		HAVING closed_calls > 0
 		ORDER BY total_pnl DESC`)
@@ -732,6 +844,14 @@ func (s *DatabaseStorage) GetAllUserStats() []UserStats {
 		// Вычисляем winrate
 		if stat.ClosedCalls > 0 {
 			stat.WinRate = (float64(stat.WinningCalls) / float64(stat.ClosedCalls)) * 100
+		}
+
+		// Получаем информацию о депозите
+		initialDeposit, currentDeposit, err := s.GetUserDeposit(stat.UserID)
+		if err == nil {
+			stat.InitialDeposit = initialDeposit
+			stat.CurrentDeposit = currentDeposit
+			stat.TotalReturnPercent = ((currentDeposit - initialDeposit) / initialDeposit) * 100
 		}
 
 		stats = append(stats, stat)
