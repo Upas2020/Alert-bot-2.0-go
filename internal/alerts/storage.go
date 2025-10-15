@@ -626,7 +626,6 @@ func (s *DatabaseStorage) CloseCall(callID string, userID int64, exitPrice float
 	}
 
 	newSize := call.Size - sizeToClose
-	newDepositPercent := call.DepositPercent * (newSize / call.Size)
 	status := "open"
 	var closedAt sql.NullTime
 
@@ -642,9 +641,9 @@ func (s *DatabaseStorage) CloseCall(callID string, userID int64, exitPrice float
 	// Обновляем колл в базе данных
 	_, err = s.db.Exec(`
 		UPDATE calls
-		SET exit_price = ?, pnl_percent = ?, size = ?, status = ?, closed_at = ?, deposit_percent = ?
+		SET exit_price = ?, pnl_percent = ?, size = ?, status = ?, closed_at = ?
 		WHERE id = ?`,
-		exitPrice, pnlPercentForClosedPart, newSize, status, closedAt, newDepositPercent, callID)
+		exitPrice, pnlPercentForClosedPart, newSize, status, closedAt, callID)
 
 	if err != nil {
 		return err
@@ -784,7 +783,7 @@ func (s *DatabaseStorage) GetUserStats(userID int64) (*UserStats, error) {
 			COALESCE(MAX(CASE WHEN status = 'closed' THEN pnl_percent ELSE NULL END), 0) as best_call,
 			COALESCE(MIN(CASE WHEN status = 'closed' THEN pnl_percent ELSE NULL END), 0) as worst_call
 		FROM calls 
-		WHERE user_id = ? AND opened_at >= datetime('now', '-90 days') and deposit_percent > 0
+		WHERE user_id = ? AND opened_at >= datetime('now', '-90 days') and deposit_percent>0
 		GROUP BY user_id, username`,
 		userID).Scan(
 		&stats.UserID, &stats.Username, &stats.TotalCalls, &stats.ClosedCalls,
@@ -819,9 +818,8 @@ func (s *DatabaseStorage) GetAllUserStats() []UserStats {
 			COALESCE(MAX(CASE WHEN status = 'closed' THEN pnl_percent ELSE NULL END), 0) as best_call,
 			COALESCE(MIN(CASE WHEN status = 'closed' THEN pnl_percent ELSE NULL END), 0) as worst_call
 		FROM calls 
-		WHERE opened_at >= datetime('now', '-90 days') and deposit_percent >0
+		WHERE opened_at >= datetime('now', '-90 days') and deposit_percent>0
 		GROUP BY user_id, username
-		HAVING closed_calls > 0
 		ORDER BY total_pnl DESC`)
 
 	if err != nil {
@@ -875,7 +873,7 @@ func (s *DatabaseStorage) GetUserTradesBySymbol(userID int64) map[string]struct 
 			SUM(CASE WHEN status = 'closed' AND pnl_percent > 0 THEN 1 ELSE 0 END) as winning_calls,
 			COALESCE(SUM(CASE WHEN status = 'closed' THEN pnl_percent ELSE 0 END), 0) as total_pnl
 		FROM calls 
-		WHERE user_id = ? AND opened_at >= datetime('now', '-90 days')
+		WHERE user_id = ? AND opened_at >= datetime('now', '-90 days') and deposit_percent>0
 		GROUP BY symbol
 		ORDER BY symbol`,
 		userID)

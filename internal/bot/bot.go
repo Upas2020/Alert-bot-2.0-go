@@ -163,17 +163,30 @@ func (b *TelegramBot) reply(chatID int64, text string) {
 	}
 }
 
-// cmdAddAlert обрабатывает команду /add TICKER price|pct VALUE
+// cmdAddAlert обрабатывает команду /add TICKER [price|pct] VALUE
 func (b *TelegramBot) cmdAddAlert(ctx context.Context, chatID int64, userID int64, username string, text string) {
 	parts := strings.Fields(text)
-	if len(parts) != 4 {
-		b.reply(chatID, "Использование: /add TICKER price|pct VALUE\nПример: /add BTCUSDT price 50000")
+
+	// Теперь допускаем как 3, так и 4 части
+	if len(parts) < 3 || len(parts) > 4 {
+		b.reply(chatID, "Использование: /add TICKER [price|pct] VALUE\nПример: /add BTCUSDT price 50000\nПример: /add BTCUSDT 50000 (по умолчанию price)\nПример: /add BTCUSDT pct 5")
 		return
 	}
 
 	symbol := formatSymbol(parts[1])
-	alertType := parts[2]
-	valueStr := parts[3]
+	var alertType string
+	var valueStr string
+
+	// Определяем формат команды
+	if len(parts) == 4 {
+		// Формат: /add TICKER price|pct VALUE
+		alertType = parts[2]
+		valueStr = parts[3]
+	} else {
+		// Формат: /add TICKER VALUE (по умолчанию price)
+		alertType = "price"
+		valueStr = parts[2]
+	}
 
 	value, err := strconv.ParseFloat(valueStr, 64)
 	if err != nil {
@@ -663,10 +676,22 @@ func (b *TelegramBot) cmdCallStats(chatID int64) {
 		return stats[i].TotalPnl > stats[j].TotalPnl
 	})
 
+	// Фильтруем: показываем только тех, у кого есть что показать
+	var filteredStats []alerts.UserStats
+	for _, stat := range stats {
+		if stat.TotalCalls > 0 {
+			filteredStats = append(filteredStats, stat)
+		}
+	}
+	if len(filteredStats) == 0 {
+		b.reply(chatID, "Нет данных для статистики")
+		return
+	}
+
 	var msg strings.Builder
 	msg.WriteString("📊 *Рейтинг трейдеров за последние 90 дней:*\n\n")
 
-	for i, stat := range stats {
+	for i, stat := range filteredStats {
 		username := stat.Username
 		if username == "" {
 			username = fmt.Sprintf("User_%d", stat.UserID)
@@ -674,13 +699,13 @@ func (b *TelegramBot) cmdCallStats(chatID int64) {
 
 		msg.WriteString(fmt.Sprintf("%d. *%s*\n", i+1, username))
 
-		// Показываем доходность депозита, если есть данные
+		// Доходность депозита
 		if stat.InitialDeposit > 0 && stat.CurrentDeposit > 0 {
 			returnSign := "+"
 			if stat.TotalReturnPercent < 0 {
 				returnSign = ""
 			}
-			msg.WriteString(fmt.Sprintf("   💰 Доходность депозита: %s%.2f%% (%.0f → %.0f)\n",
+			msg.WriteString(fmt.Sprintf("   💰 Доходность: %s%.2f%% (%.0f → %.0f)\n",
 				returnSign, stat.TotalReturnPercent, stat.InitialDeposit, stat.CurrentDeposit))
 		}
 
@@ -690,7 +715,7 @@ func (b *TelegramBot) cmdCallStats(chatID int64) {
 			if stat.TotalPnl < 0 {
 				pnlSign = ""
 			}
-			msg.WriteString(fmt.Sprintf("   📊 Закрытых: %d | PnL: %s%.2f%% | Winrate: %.1f%%\n",
+			msg.WriteString(fmt.Sprintf("   📊 Закрыто: %d | PnL: %s%.2f%% | WR: %.1f%%\n",
 				stat.ClosedCalls, pnlSign, stat.TotalPnl, stat.WinRate))
 		}
 
@@ -701,15 +726,14 @@ func (b *TelegramBot) cmdCallStats(chatID int64) {
 				pnlToDepositSign = ""
 			}
 
-			// Показываем размер позиций и плечо если > 100%
-			positionInfo := fmt.Sprintf("%.0f%%", stat.TotalActiveDepositPercent)
+			posInfo := fmt.Sprintf("%.0f%%", stat.TotalActiveDepositPercent)
 			if stat.TotalActiveDepositPercent > 100 {
 				avgLeverage := stat.TotalActiveDepositPercent / 100
-				positionInfo = fmt.Sprintf("%.0f%% (~x%.1f)", stat.TotalActiveDepositPercent, avgLeverage)
+				posInfo = fmt.Sprintf("%.0f%% (~x%.1f)", stat.TotalActiveDepositPercent, avgLeverage)
 			}
 
 			msg.WriteString(fmt.Sprintf("   💼 Позиции: %s | PnL: %s%.2f%%\n",
-				positionInfo, pnlToDepositSign, stat.TotalPnlToDeposit))
+				posInfo, pnlToDepositSign, stat.TotalPnlToDeposit))
 		}
 		msg.WriteString("\n")
 	}
@@ -1503,11 +1527,11 @@ func (b *TelegramBot) startMonitoring(ctx context.Context) {
 
 							if call.Direction == "long" && newPrice <= call.StopLossPrice {
 								triggeredSL = true
-								slMsg = fmt.Sprintf("СТОП-ЛОСС! Колл `%s` (%s %s) закрыт по стоп-лоссу: цена %s достигла %s",
+								slMsg = fmt.Sprintf("СТОП-ЛОСС! Колл `%s` (%s %s) закрыт по стоп-лоссу: цена %s достигла/пробила %s",
 									call.ID, call.Symbol, "Long", prices.FormatPrice(newPrice), prices.FormatPrice(call.StopLossPrice))
 							} else if call.Direction == "short" && newPrice >= call.StopLossPrice {
 								triggeredSL = true
-								slMsg = fmt.Sprintf("СТОП-ЛОСС! Колл `%s` (%s %s) закрыт по стоп-лоссу: цена %s достигла %s",
+								slMsg = fmt.Sprintf("СТОП-ЛОСС! Колл `%s` (%s %s) закрыт по стоп-лоссу: цена %s достигла/пробила %s",
 									call.ID, call.Symbol, "Short", prices.FormatPrice(newPrice), prices.FormatPrice(call.StopLossPrice))
 							}
 
@@ -1517,10 +1541,11 @@ func (b *TelegramBot) startMonitoring(ctx context.Context) {
 									"symbol":          call.Symbol,
 									"current_price":   newPrice,
 									"stop_loss_price": call.StopLossPrice,
+									"direction":       call.Direction,
 								}).Info("stop-loss triggered")
 
-								// Закрываем колл полностью
-								err := b.st.CloseCall(call.ID, call.UserID, newPrice, 100.0)
+								// Закрываем колл полностью оставшимся размером
+								err := b.st.CloseCall(call.ID, call.UserID, newPrice, call.Size)
 								if err != nil {
 									logrus.WithError(err).WithField("call_id", call.ID).Error("failed to close call by stop-loss")
 								} else {
