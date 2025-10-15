@@ -9,8 +9,10 @@ import (
 	"strings"
 	"time"
 
+	"example.com/alert-bot/internal/reminder"
 	"github.com/sirupsen/logrus"
-	_ "modernc.org/sqlite" // Возвращаем pure Go SQLite драйвер
+	_ "modernc.org/sqlite"
+	// Возвращаем pure Go SQLite драйвер
 )
 
 type Alert struct {
@@ -120,8 +122,32 @@ func (s *DatabaseStorage) Close() error {
 	return s.db.Close()
 }
 
+// DB возвращает *sql.DB для внешних пакетов
+func (s *DatabaseStorage) DB() *sql.DB {
+	return s.db
+}
+func (s *DatabaseStorage) InsertReminder(r reminder.Task) error {
+	return reminder.InsertReminder(s.db, r)
+}
+func (s *DatabaseStorage) DeleteReminder(id string) { reminder.DeleteReminder(s.db, id) }
+func (s *DatabaseStorage) GetPendingReminders() ([]reminder.Task, error) {
+	return reminder.GetPendingReminders(s.db)
+}
+
 func (s *DatabaseStorage) migrate() error {
 	queries := []string{
+		`CREATE TABLE IF NOT EXISTS reminders (
+			id TEXT PRIMARY KEY,
+			chat_id INTEGER NOT NULL,
+			user_id INTEGER NOT NULL,
+			username TEXT DEFAULT '',
+			symbol TEXT NOT NULL,
+			text TEXT DEFAULT '',
+			trigger_at DATETIME NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_reminders_trigger_at ON reminders(trigger_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_reminders_chat_id   ON reminders(chat_id)`,
 		`CREATE TABLE IF NOT EXISTS alerts (
 			id TEXT PRIMARY KEY,
 			chat_id INTEGER NOT NULL,

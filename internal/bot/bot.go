@@ -17,6 +17,7 @@ import (
 	"example.com/alert-bot/internal/alerts"
 	"example.com/alert-bot/internal/config"
 	"example.com/alert-bot/internal/prices"
+	"example.com/alert-bot/internal/reminder"
 )
 
 // TelegramBot инкапсулирует работу с Telegram API.
@@ -27,7 +28,7 @@ type TelegramBot struct {
 	monitorCtx    context.Context
 	stopMon       context.CancelFunc
 	pricesClients *prices.ExchangeClients // Добавлено поле для клиентов бирж
-
+	scheduler     *reminder.Scheduler
 	// Для отслеживания резких изменений цен
 	sharpChangeMu        sync.Mutex
 	lastSharpChangeAlert map[string]struct {
@@ -50,9 +51,9 @@ func NewTelegramBot(cfg config.Config) (*TelegramBot, error) {
 		return nil, fmt.Errorf("database storage init: %w", err)
 	}
 
-	pricesClients := prices.NewExchangeClients(cfg) // Инициализация клиентов бирж
+	pricesClients := prices.NewExchangeClients(cfg)
 
-	return &TelegramBot{
+	bot := &TelegramBot{
 		api:           api,
 		cfg:           cfg,
 		st:            st,
@@ -61,7 +62,14 @@ func NewTelegramBot(cfg config.Config) (*TelegramBot, error) {
 			Time  time.Time
 			Price float64
 		}),
-	}, nil
+		// ⬇️ scheduler создаём ПОСЛЕ объявления bot, но до return
+		scheduler: nil, // временно, сразу ниже заполним
+	}
+
+	// ⬇️ теперь у нас ЕСТЬ переменная bot и доступ к st.DB()
+	bot.scheduler = reminder.NewScheduler(st.DB(), api)
+
+	return bot, nil
 }
 
 // Start запускает обработку апдейтов до завершения контекста.
@@ -77,7 +85,7 @@ func (b *TelegramBot) Start(ctx context.Context) error {
 
 	// Запуск мониторинга цен для алертов
 	b.startMonitoring(ctx)
-
+	go b.scheduler.Start(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -146,6 +154,8 @@ func (b *TelegramBot) handleUpdate(ctx context.Context, upd tgbotapi.Update) {
 		b.cmdStats(chatID, userID)
 	case text == "/rush":
 		b.cmdRush(ctx, chatID, userID)
+	case strings.HasPrefix(text, "/remind"):
+		b.cmdRemind(ctx, chatID, userID, username, text)
 	case text == "/start":
 		b.reply(chatID, "*Way2Million, by Saint\\_Dmitriy*\n\n*Команды:*\n/start - список всех команд бота\n/chatid - показать Chat ID, User ID и Username\n/add TICKER price|pct VALUE - создать алерт\n/alerts - показать все активные алерты пользователя\n/del ID - удалить алерт по ID\n/clearallalerts - удалить все алерты\n/p TICKER - показать цену одного символа с изменениями\n/allp - показать цены всех токенов из алертов и коллов\n/ocall TICKER [long|short] [size] sl [sl PRICE] - открыть колл (по умолчанию long), по умолчанию без стопа \n/ccall CALLID [size] - закрыть колл по ID (по умолчанию закрывается 100%)\n/sl CALLID [price] - установить/обновить стоп-лосс для колла (по умолчанию цена открытия)\n/mycalls - показать активные коллы с текущим PnL\n/allcalls - показать все коллы всех пользователей\n/rush - закрыть все открытые коллы пользователя\n/callstats - рейтинг трейдеров за 90 дней\n/mycallstats - персональная статистика коллов за 90 дней\n/mytrades - статистика по символам за 90 дней\n/history - история сработавших алертов\n/stats - статистика по активным алертам")
 	default:
@@ -161,6 +171,49 @@ func (b *TelegramBot) reply(chatID int64, text string) {
 	} else {
 		logrus.WithFields(logrus.Fields{"chat_id": chatID}).Debug("message sent")
 	}
+}
+
+// Напоминания
+func (b *TelegramBot) cmdRemind(ctx context.Context, chatID, userID int64, username, txt string) {
+	parts := strings.Fields(txt)
+	if len(parts) < 3 {
+		b.reply(chatID, "Использование: /remind TICKER <время> [текст]\nПримеры: 5m 2h 3d")
+		return
+	}
+	symbol := formatSymbol(parts[1])
+	dur, err := parseDuration(parts[2])
+	if err != nil {
+		b.reply(chatID, "Не разобрал время. Используй: 10m, 2h, 3d")
+		return
+	}
+	custom := strings.Join(parts[3:], " ")
+
+	id, err := b.scheduler.Add(ctx, chatID, userID, username, symbol, custom, dur)
+	if err != nil {
+		b.reply(chatID, "Ошибка: "+err.Error())
+		return
+	}
+	when := time.Now().Add(dur).Format("15:04 02.01")
+	b.reply(chatID, fmt.Sprintf("Напомню про %s в %s (id `%s`)", symbol, when, id))
+}
+
+func parseDuration(s string) (time.Duration, error) {
+	if len(s) < 2 {
+		return 0, fmt.Errorf("слишком коротко")
+	}
+	val, err := strconv.Atoi(s[:len(s)-1])
+	if err != nil {
+		return 0, err
+	}
+	switch s[len(s)-1] {
+	case 'm':
+		return time.Duration(val) * time.Minute, nil
+	case 'h':
+		return time.Duration(val) * time.Hour, nil
+	case 'd':
+		return time.Duration(val) * 24 * time.Hour, nil
+	}
+	return 0, fmt.Errorf("недопустимая единица")
 }
 
 // cmdAddAlert обрабатывает команду /add TICKER [price|pct] VALUE
