@@ -537,7 +537,6 @@ func (b *TelegramBot) cmdCloseCall(ctx context.Context, chatID int64, userID int
 }
 
 // cmdMyCalls показывает активные коллы пользователя, сгруппированные по тикерам
-// cmdMyCalls показывает активные коллы пользователя, сгруппированные по тикерам
 func (b *TelegramBot) cmdMyCalls(ctx context.Context, chatID int64, userID int64) {
 	calls := b.st.GetUserCalls(userID, true)
 	if len(calls) == 0 {
@@ -653,7 +652,7 @@ func (b *TelegramBot) cmdMyCalls(ctx context.Context, chatID int64, userID int64
 
 			sizeStr := fmt.Sprintf("%.0f%%", effectiveSize)
 			if call.Size < 100 {
-				sizeStr = fmt.Sprintf("%.0f%% (открыто %.0f%%)", effectiveSize, call.Size)
+				sizeStr = fmt.Sprintf("%.0f%% (Осталось %.0f%%)", effectiveSize, call.Size)
 			}
 
 			callInfos = append(callInfos, CallInfo{
@@ -697,7 +696,7 @@ func (b *TelegramBot) cmdMyCalls(ctx context.Context, chatID int64, userID int64
 				pnlSign = ""
 			}
 
-			msg.WriteString(fmt.Sprintf("         %d. ID: `%s`, вход: %s, размер: %s, PnL: %s%.2f%%, время: %s\n",
+			msg.WriteString(fmt.Sprintf("      %d. ID: `%s`, entry: %s, size: %s, PnL: %s%.2f%%, t: %s\n",
 				i+1, info.ID, prices.FormatPrice(info.EntryPrice), info.SizeStr, pnlSign, info.BasePnl, info.HoldingTime))
 		}
 
