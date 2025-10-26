@@ -301,6 +301,10 @@ func FormatPrice(price float64) string {
 	return formatted
 }
 
+func FormatAvgPrice(price float64) string {
+	return fmt.Sprintf("%.2f", price)
+}
+
 // min helper function
 func min(a, b int) int {
 	if a < b {

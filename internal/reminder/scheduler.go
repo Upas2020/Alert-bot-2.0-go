@@ -58,7 +58,7 @@ func (s *Scheduler) schedule(ctx context.Context, t Task) {
 }
 
 func (s *Scheduler) fire(t Task) {
-	msg := fmt.Sprintf("🔔 Посмотри на график %s", t.Symbol)
+	msg := fmt.Sprintf("📅 Посмотри на график %s", t.Symbol)
 	if t.Text != "" {
 		msg += fmt.Sprintf(", %s", t.Text)
 	}

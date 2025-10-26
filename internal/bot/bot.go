@@ -536,7 +536,8 @@ func (b *TelegramBot) cmdCloseCall(ctx context.Context, chatID int64, userID int
 	}
 }
 
-// cmdMyCalls показывает активные коллы пользователя
+// cmdMyCalls показывает активные коллы пользователя, сгруппированные по тикерам
+// cmdMyCalls показывает активные коллы пользователя, сгруппированные по тикерам
 func (b *TelegramBot) cmdMyCalls(ctx context.Context, chatID int64, userID int64) {
 	calls := b.st.GetUserCalls(userID, true)
 	if len(calls) == 0 {
@@ -544,77 +545,167 @@ func (b *TelegramBot) cmdMyCalls(ctx context.Context, chatID int64, userID int64
 		return
 	}
 
+	// Группируем коллы по символу и направлению
+	type SymbolKey struct {
+		Symbol    string
+		Direction string
+	}
+
+	callsBySymbol := make(map[SymbolKey][]alerts.Call)
+	for _, call := range calls {
+		key := SymbolKey{Symbol: call.Symbol, Direction: call.Direction}
+		callsBySymbol[key] = append(callsBySymbol[key], call)
+	}
+
+	// Получаем отсортированные ключи
+	var keys []SymbolKey
+	for key := range callsBySymbol {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].Symbol == keys[j].Symbol {
+			return keys[i].Direction < keys[j].Direction
+		}
+		return keys[i].Symbol < keys[j].Symbol
+	})
+
 	var msg strings.Builder
 	msg.WriteString("Ваши активные коллы:\n\n")
 
 	var totalPositionSize float64
 	var totalPnlToDeposit float64
+	symbolIndex := 1
 
-	for i, call := range calls {
-		directionRus := "Long"
-		if call.Direction == "short" {
-			directionRus = "Short"
-		}
+	for _, key := range keys {
+		symbolCalls := callsBySymbol[key]
 
-		priceInfo, err := prices.FetchCurrentPrice(b.pricesClients, call.Symbol, call.Exchange, call.Market)
+		// Получаем текущую цену для символа
+		priceInfo, err := prices.FetchCurrentPrice(b.pricesClients, key.Symbol, symbolCalls[0].Exchange, symbolCalls[0].Market)
 		if err != nil {
-			logrus.WithError(err).WithField("symbol", call.Symbol).Warn("failed to get current price for call")
-			msg.WriteString(fmt.Sprintf("%d. %s (%s) - ID: `%s` (ошибка цены)\n\n", i+1, call.Symbol, directionRus, call.ID))
+			logrus.WithError(err).WithField("symbol", key.Symbol).Warn("failed to get current price for symbol group")
 			continue
 		}
 		currentPrice := priceInfo.CurrentPrice
 
-		// Базовое изменение цены
-		var basePnl float64
-		if call.Direction == "long" {
-			basePnl = ((currentPrice - call.EntryPrice) / call.EntryPrice) * 100
-		} else {
-			basePnl = ((call.EntryPrice - currentPrice) / call.EntryPrice) * 100
+		directionRus := "Long"
+		if key.Direction == "short" {
+			directionRus = "Short"
 		}
 
-		// Вклад в депозит
-		pnlToDeposit := call.DepositPercent * (basePnl / 100)
+		// Заголовок группы
+		msg.WriteString(fmt.Sprintf("%d. %s (%s)\n\n", symbolIndex, key.Symbol, directionRus))
 
-		pnlSign := "+"
-		if basePnl < 0 {
-			pnlSign = ""
+		var groupTotalSize float64
+		var groupWeightedEntry float64
+		var groupWeightedPnl float64
+
+		// Сортируем коллы внутри группы по времени открытия
+		sort.Slice(symbolCalls, func(i, j int) bool {
+			return symbolCalls[i].OpenedAt.Before(symbolCalls[j].OpenedAt)
+		})
+
+		// Собираем информацию о коллах для последующего вывода
+		type CallInfo struct {
+			ID            string
+			EntryPrice    float64
+			EffectiveSize float64
+			SizeStr       string
+			BasePnl       float64
+			HoldingTime   string
 		}
+		var callInfos []CallInfo
 
-		msg.WriteString(fmt.Sprintf("%d. %s (%s) - ID: `%s`\n", i+1, call.Symbol, directionRus, call.ID))
-		msg.WriteString(fmt.Sprintf("   Цена входа: %s\n", prices.FormatPrice(call.EntryPrice)))
-		msg.WriteString(fmt.Sprintf("   Биржа: %s, Рынок: %s\n", call.Exchange, call.Market))
-
-		if call.Size < 100 {
-			msg.WriteString(fmt.Sprintf("   Открытый размер: %.0f%%\n", call.Size))
-		}
-
-		if call.DepositPercent > 0 {
-			posInfo := fmt.Sprintf("   Размер позиции: %.0f%%", call.DepositPercent)
-			if call.DepositPercent > 100 {
-				leverage := call.DepositPercent / 100
-				posInfo += fmt.Sprintf(" (~x%.1f)", leverage)
+		// Выводим каждый колл в группе
+		for _, call := range symbolCalls {
+			// Базовое изменение цены
+			var basePnl float64
+			if call.Direction == "long" {
+				basePnl = ((currentPrice - call.EntryPrice) / call.EntryPrice) * 100
+			} else {
+				basePnl = ((call.EntryPrice - currentPrice) / call.EntryPrice) * 100
 			}
-			msg.WriteString(posInfo + "\n")
 
-			totalPositionSize += call.DepositPercent
+			// Вклад в депозит
+			pnlToDeposit := call.DepositPercent * (basePnl / 100)
+
+			// Время удержания
+			holdingTime := time.Since(call.OpenedAt)
+			var holdingStr string
+			totalMinutes := int(holdingTime.Minutes())
+
+			if totalMinutes < 60 {
+				holdingStr = fmt.Sprintf("%dmin", totalMinutes)
+			} else if totalMinutes < 1440 { // меньше 24 часов
+				hours := totalMinutes / 60
+				holdingStr = fmt.Sprintf("%dh", hours)
+			} else {
+				days := totalMinutes / 1440
+				hours := (totalMinutes % 1440) / 60
+				if hours > 0 {
+					holdingStr = fmt.Sprintf("%dd:%dh", days, hours)
+				} else {
+					holdingStr = fmt.Sprintf("%dd", days)
+				}
+			}
+
+			// Размер с учетом частичного закрытия
+			effectiveSize := call.DepositPercent * (call.Size / 100)
+
+			sizeStr := fmt.Sprintf("%.0f%%", effectiveSize)
+			if call.Size < 100 {
+				sizeStr = fmt.Sprintf("%.0f%% (открыто %.0f%%)", effectiveSize, call.Size)
+			}
+
+			callInfos = append(callInfos, CallInfo{
+				ID:            call.ID,
+				EntryPrice:    call.EntryPrice,
+				EffectiveSize: effectiveSize,
+				SizeStr:       sizeStr,
+				BasePnl:       basePnl,
+				HoldingTime:   holdingStr,
+			})
+
+			// Накапливаем для средних значений
+			groupTotalSize += effectiveSize
+			groupWeightedEntry += call.EntryPrice * effectiveSize
+			groupWeightedPnl += pnlToDeposit
+
+			totalPositionSize += effectiveSize
 			totalPnlToDeposit += pnlToDeposit
 		}
 
-		msg.WriteString(fmt.Sprintf("   Текущая цена: %s\n", prices.FormatPrice(currentPrice)))
-		msg.WriteString(fmt.Sprintf("   PnL цены: %s%.2f%%\n", pnlSign, basePnl))
+		// Средние значения для группы
+		avgEntry := groupWeightedEntry / groupTotalSize
 
-		pnlDepositSign := "+"
-		if pnlToDeposit < 0 {
-			pnlDepositSign = ""
+		pnlGroupSign := "+"
+		if groupWeightedPnl < 0 {
+			pnlGroupSign = ""
 		}
-		msg.WriteString(fmt.Sprintf("   Вклад в депозит: %s%.2f%%\n", pnlDepositSign, pnlToDeposit))
 
-		if call.StopLossPrice > 0 {
-			msg.WriteString(fmt.Sprintf("   Стоп-лосс: %s\n", prices.FormatPrice(call.StopLossPrice)))
+		// Выводим информацию о группе
+		msg.WriteString(fmt.Sprintf("     Текущая цена: %s\n", prices.FormatPrice(currentPrice)))
+		msg.WriteString(fmt.Sprintf("     Средний вход: %s\n", prices.FormatAvgPrice(avgEntry)))
+		msg.WriteString(fmt.Sprintf("     Общий размер: %.0f%%\n", groupTotalSize))
+		msg.WriteString(fmt.Sprintf("     Общий PnL: %s%.2f%%\n", pnlGroupSign, groupWeightedPnl))
+		msg.WriteString(fmt.Sprintf("     Биржа: %s, Рынок: %s\n", symbolCalls[0].Exchange, symbolCalls[0].Market))
+		msg.WriteString("     Коллы:\n")
+
+		// Выводим список коллов
+		for i, info := range callInfos {
+			pnlSign := "+"
+			if info.BasePnl < 0 {
+				pnlSign = ""
+			}
+
+			msg.WriteString(fmt.Sprintf("         %d. ID: `%s`, вход: %s, размер: %s, PnL: %s%.2f%%, время: %s\n",
+				i+1, info.ID, prices.FormatPrice(info.EntryPrice), info.SizeStr, pnlSign, info.BasePnl, info.HoldingTime))
 		}
+
 		msg.WriteString("\n")
+		symbolIndex++
 	}
 
+	// Итоговая статистика
 	if totalPositionSize > 0 {
 		posInfo := fmt.Sprintf("*Совокупный размер позиций: %.0f%%*", totalPositionSize)
 		if totalPositionSize > 100 {
@@ -1001,7 +1092,7 @@ type CallWithPnL struct {
 	CurrentPnl   float64
 }
 
-// cmdAllCalls показывает все активные коллы всех пользователей
+// cmdAllCalls показывает все активные коллы всех пользователей, сгруппированные по символам
 func (b *TelegramBot) cmdAllCalls(ctx context.Context, chatID int64) {
 	calls := b.st.GetAllOpenCalls()
 	if len(calls) == 0 {
@@ -1009,64 +1100,122 @@ func (b *TelegramBot) cmdAllCalls(ctx context.Context, chatID int64) {
 		return
 	}
 
-	// Получаем текущие цены и вычисляем PnL для сортировки
+	// Группируем по символу и направлению
+	type SymbolKey struct {
+		Symbol    string
+		Direction string
+	}
+
+	// Сначала получаем цены и PnL для всех коллов
+	type CallWithPnL struct {
+		Call         alerts.Call
+		CurrentPrice float64
+		BasePnl      float64
+		PnlToDeposit float64
+	}
+
 	var callsWithPnl []CallWithPnL
 	for _, call := range calls {
 		priceInfo, err := prices.FetchCurrentPrice(b.pricesClients, call.Symbol, call.Exchange, call.Market)
 		if err != nil {
 			logrus.WithError(err).WithField("symbol", call.Symbol).Warn("failed to get current price for call")
-			// Если не можем получить текущую цену, пропускаем этот колл
 			continue
 		}
 		currentPrice := priceInfo.CurrentPrice
 
-		var currentPnl float64
+		var basePnl float64
 		if call.Direction == "long" {
-			currentPnl = ((currentPrice - call.EntryPrice) / call.EntryPrice) * 100
+			basePnl = ((currentPrice - call.EntryPrice) / call.EntryPrice) * 100
 		} else {
-			currentPnl = ((call.EntryPrice - currentPrice) / call.EntryPrice) * 100
+			basePnl = ((call.EntryPrice - currentPrice) / call.EntryPrice) * 100
 		}
+
+		pnlToDeposit := call.DepositPercent * (basePnl / 100)
 
 		callsWithPnl = append(callsWithPnl, CallWithPnL{
 			Call:         call,
 			CurrentPrice: currentPrice,
-			CurrentPnl:   currentPnl,
+			BasePnl:      basePnl,
+			PnlToDeposit: pnlToDeposit,
 		})
 	}
 
-	// Сортируем по текущему PnL (по убыванию)
-	sort.Slice(callsWithPnl, func(i, j int) bool {
-		return callsWithPnl[i].CurrentPnl > callsWithPnl[j].CurrentPnl
+	// Группируем по символу и направлению
+	callsBySymbol := make(map[SymbolKey][]CallWithPnL)
+	for _, cwp := range callsWithPnl {
+		key := SymbolKey{Symbol: cwp.Call.Symbol, Direction: cwp.Call.Direction}
+		callsBySymbol[key] = append(callsBySymbol[key], cwp)
+	}
+
+	// Вычисляем средний PnL для каждой группы для сортировки
+	type SymbolGroup struct {
+		Key        SymbolKey
+		AvgPnl     float64
+		TotalCalls int
+	}
+
+	var groups []SymbolGroup
+	for key, groupCalls := range callsBySymbol {
+		var totalPnl float64
+		for _, cwp := range groupCalls {
+			totalPnl += cwp.BasePnl
+		}
+		avgPnl := totalPnl / float64(len(groupCalls))
+		groups = append(groups, SymbolGroup{
+			Key:        key,
+			AvgPnl:     avgPnl,
+			TotalCalls: len(groupCalls),
+		})
+	}
+
+	// Сортируем группы по среднему PnL
+	sort.Slice(groups, func(i, j int) bool {
+		return groups[i].AvgPnl > groups[j].AvgPnl
 	})
 
 	var msg strings.Builder
 	msg.WriteString("Все активные коллы (отсортированы по PnL):\n\n")
 
-	for i, callPnl := range callsWithPnl {
-		call := callPnl.Call
+	for groupIndex, group := range groups {
+		groupCalls := callsBySymbol[group.Key]
 
-		pnlSign := "+"
-		if callPnl.CurrentPnl < 0 {
-			pnlSign = ""
-		}
+		// Сортируем коллы внутри группы по PnL
+		sort.Slice(groupCalls, func(i, j int) bool {
+			return groupCalls[i].BasePnl > groupCalls[j].BasePnl
+		})
 
 		directionRus := "Long"
-		if call.Direction == "short" {
+		if group.Key.Direction == "short" {
 			directionRus = "Short"
 		}
 
-		username := call.Username
-		if username == "" {
-			username = fmt.Sprintf("User_%d", call.UserID)
-		}
+		// Заголовок группы
+		msg.WriteString(fmt.Sprintf("%d. %s (%s)\n", groupIndex+1, group.Key.Symbol, directionRus))
 
-		msg.WriteString(fmt.Sprintf("%d. %s - %s (%s)\n", i+1, username, call.Symbol, directionRus))
-		msg.WriteString(fmt.Sprintf("   Цена входа: %s\n", prices.FormatPrice(call.EntryPrice)))
-		msg.WriteString(fmt.Sprintf("   Биржа: %s, Рынок: %s\n", call.Exchange, call.Market))
-		if call.Size < 100 {
-			msg.WriteString(fmt.Sprintf("   Открытый размер: %.0f\n", call.Size))
+		// Выводим каждый колл в группе
+		for i, cwp := range groupCalls {
+			call := cwp.Call
+			username := call.Username
+			if username == "" {
+				username = fmt.Sprintf("User_%d", call.UserID)
+			}
+
+			pnlSign := "+"
+			if cwp.BasePnl < 0 {
+				pnlSign = ""
+			}
+
+			msg.WriteString(fmt.Sprintf("   %d. %s\n", i+1, username))
+			msg.WriteString(fmt.Sprintf("      Цена входа: %s\n", prices.FormatPrice(call.EntryPrice)))
+			msg.WriteString(fmt.Sprintf("      Биржа: %s, Рынок: %s\n", call.Exchange, call.Market))
+
+			if call.Size < 100 {
+				msg.WriteString(fmt.Sprintf("      Открытый размер: %.0f%%\n", call.Size))
+			}
+
+			msg.WriteString(fmt.Sprintf("      Текущий PnL: %s%.2f%%\n", pnlSign, cwp.BasePnl))
 		}
-		msg.WriteString(fmt.Sprintf("   Текущий PnL: %s%.2f%%\n\n", pnlSign, callPnl.CurrentPnl))
+		msg.WriteString("\n")
 	}
 
 	b.reply(chatID, msg.String())
@@ -1263,7 +1412,7 @@ func (b *TelegramBot) checkAlerts(symbol string, currentPrice float64) {
 			// Проверяем попадание в диапазон с погрешностью
 			if math.Abs(currentPrice-alert.TargetPrice) <= tolerance {
 				triggered = true
-				msg = fmt.Sprintf("АЛЕРТ! %s достиг %s (текущая: %s)", symbol, prices.FormatPrice(alert.TargetPrice), prices.FormatPrice(currentPrice))
+				msg = fmt.Sprintf("🚨АЛЕРТ! %s достиг %s (текущая: %s)", symbol, prices.FormatPrice(alert.TargetPrice), prices.FormatPrice(currentPrice))
 				logrus.WithField("alert_id", alert.ID).Info("price alert triggered")
 			}
 		}
@@ -1580,11 +1729,11 @@ func (b *TelegramBot) startMonitoring(ctx context.Context) {
 
 							if call.Direction == "long" && newPrice <= call.StopLossPrice {
 								triggeredSL = true
-								slMsg = fmt.Sprintf("СТОП-ЛОСС! Колл `%s` (%s %s) закрыт по стоп-лоссу: цена %s достигла/пробила %s",
+								slMsg = fmt.Sprintf("🛑 СТОП-ЛОСС! Колл `%s` (%s %s) закрыт по стоп-лоссу: цена %s достигла/пробила %s",
 									call.ID, call.Symbol, "Long", prices.FormatPrice(newPrice), prices.FormatPrice(call.StopLossPrice))
 							} else if call.Direction == "short" && newPrice >= call.StopLossPrice {
 								triggeredSL = true
-								slMsg = fmt.Sprintf("СТОП-ЛОСС! Колл `%s` (%s %s) закрыт по стоп-лоссу: цена %s достигла/пробила %s",
+								slMsg = fmt.Sprintf("🛑 СТОП-ЛОСС! Колл `%s` (%s %s) закрыт по стоп-лоссу: цена %s достигла/пробила %s",
 									call.ID, call.Symbol, "Short", prices.FormatPrice(newPrice), prices.FormatPrice(call.StopLossPrice))
 							}
 
