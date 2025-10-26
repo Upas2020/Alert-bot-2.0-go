@@ -537,6 +537,7 @@ func (b *TelegramBot) cmdCloseCall(ctx context.Context, chatID int64, userID int
 }
 
 // cmdMyCalls показывает активные коллы пользователя, сгруппированные по тикерам
+// cmdMyCalls показывает активные коллы пользователя, сгруппированные по тикерам
 func (b *TelegramBot) cmdMyCalls(ctx context.Context, chatID int64, userID int64) {
 	calls := b.st.GetUserCalls(userID, true)
 	if len(calls) == 0 {
@@ -676,16 +677,29 @@ func (b *TelegramBot) cmdMyCalls(ctx context.Context, chatID int64, userID int64
 		// Средние значения для группы
 		avgEntry := groupWeightedEntry / groupTotalSize
 
+		// Текущий PnL по позиции от среднего входа
+		var positionPnl float64
+		if key.Direction == "long" {
+			positionPnl = ((currentPrice - avgEntry) / avgEntry) * 100
+		} else {
+			positionPnl = ((avgEntry - currentPrice) / avgEntry) * 100
+		}
+
 		pnlGroupSign := "+"
 		if groupWeightedPnl < 0 {
 			pnlGroupSign = ""
+		}
+		positionPnlSign := "+"
+		if positionPnl < 0 {
+			positionPnlSign = ""
 		}
 
 		// Выводим информацию о группе
 		msg.WriteString(fmt.Sprintf("     Текущая цена: %s\n", prices.FormatPrice(currentPrice)))
 		msg.WriteString(fmt.Sprintf("     Средний вход: %s\n", prices.FormatAvgPrice(avgEntry)))
 		msg.WriteString(fmt.Sprintf("     Общий размер: %.0f%%\n", groupTotalSize))
-		msg.WriteString(fmt.Sprintf("     Общий PnL: %s%.2f%%\n", pnlGroupSign, groupWeightedPnl))
+		msg.WriteString(fmt.Sprintf("     Текущий PnL: %s%.2f%%\n", positionPnlSign, positionPnl))
+		msg.WriteString(fmt.Sprintf("     Общий PnL к депозиту: %s%.2f%%\n", pnlGroupSign, groupWeightedPnl))
 		msg.WriteString(fmt.Sprintf("     Биржа: %s, Рынок: %s\n", symbolCalls[0].Exchange, symbolCalls[0].Market))
 		msg.WriteString("     Коллы:\n")
 

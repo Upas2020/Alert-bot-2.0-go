@@ -302,7 +302,25 @@ func FormatPrice(price float64) string {
 }
 
 func FormatAvgPrice(price float64) string {
-	return fmt.Sprintf("%.2f", price)
+	// Для отрицательных чисел сохраняем знак
+	sign := ""
+	if price < 0 {
+		sign = "-"
+		price = -price
+	}
+
+	// Определяем формат в зависимости от величины числа
+	switch {
+	case price >= 1:
+		// Для чисел >= 1 округляем до 2 знаков
+		return fmt.Sprintf("%s%.2f", sign, price)
+	case price >= 0.0001:
+		// Для чисел от 0.0001 до 1 округляем до 4 знаков
+		return fmt.Sprintf("%s%.6f", sign, price)
+	default:
+		// Для очень маленьких чисел (< 0.0001) округляем до 8 знаков
+		return fmt.Sprintf("%s%.8f", sign, price)
+	}
 }
 
 // min helper function
