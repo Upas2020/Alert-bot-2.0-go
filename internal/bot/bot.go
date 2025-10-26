@@ -1012,7 +1012,7 @@ func (b *TelegramBot) cmdAllCalls(ctx context.Context, chatID int64) {
 	// Получаем текущие цены и вычисляем PnL для сортировки
 	var callsWithPnl []CallWithPnL
 	for _, call := range calls {
-		priceInfo, err := prices.FetchPriceInfo(b.pricesClients, call.Symbol, call.Exchange, call.Market)
+		priceInfo, err := prices.FetchCurrentPrice(b.pricesClients, call.Symbol, call.Exchange, call.Market)
 		if err != nil {
 			logrus.WithError(err).WithField("symbol", call.Symbol).Warn("failed to get current price for call")
 			// Если не можем получить текущую цену, пропускаем этот колл
