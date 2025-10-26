@@ -156,8 +156,36 @@ func (b *TelegramBot) handleUpdate(ctx context.Context, upd tgbotapi.Update) {
 		b.cmdRush(ctx, chatID, userID)
 	case strings.HasPrefix(text, "/remind"):
 		b.cmdRemind(ctx, chatID, userID, username, text)
+	case strings.HasPrefix(text, "/limit"):
+		b.cmdCreateLimitOrder(ctx, chatID, userID, username, text)
+	case strings.HasPrefix(text, "/climit"):
+		b.cmdCancelLimitOrder(ctx, chatID, userID, text)
+	case text == "/myorders":
+		b.cmdMyOrders(ctx, chatID, userID)
 	case text == "/start":
-		b.reply(chatID, "*Way2Million, by Saint\\_Dmitriy*\n\n*Команды:*\n/start - список всех команд бота\n/chatid - показать Chat ID, User ID и Username\n/add TICKER price|pct VALUE - создать алерт\n/alerts - показать все активные алерты пользователя\n/del ID - удалить алерт по ID\n/clearallalerts - удалить все алерты\n/p TICKER - показать цену одного символа с изменениями\n/allp - показать цены всех токенов из алертов и коллов\n/ocall TICKER [long|short] [size] sl [sl PRICE] - открыть колл (по умолчанию long), по умолчанию без стопа \n/ccall CALLID [size] - закрыть колл по ID (по умолчанию закрывается 100%)\n/sl CALLID [price] - установить/обновить стоп-лосс для колла (по умолчанию цена открытия)\n/mycalls - показать активные коллы с текущим PnL\n/allcalls - показать все коллы всех пользователей\n/rush - закрыть все открытые коллы пользователя\n/callstats - рейтинг трейдеров за 90 дней\n/mycallstats - персональная статистика коллов за 90 дней\n/mytrades - статистика по символам за 90 дней\n/history - история сработавших алертов\n/stats - статистика по активным алертам")
+		b.reply(chatID, "*Way2Million, by Saint\\_Dmitriy*\n\n*Команды:*\n"+
+			"/start - список всех команд бота\n"+
+			"/chatid - показать Chat ID, User ID и Username\n"+
+			"/add TICKER price|pct VALUE - создать алерт\n"+
+			"/alerts - показать все активные алерты пользователя\n"+
+			"/del ID - удалить алерт по ID\n"+
+			"/clearallalerts - удалить все алерты\n"+
+			"/p TICKER - показать цену одного символа с изменениями\n"+
+			"/allp - показать цены всех токенов из алертов и коллов\n"+
+			"/ocall TICKER [long|short] [size] sl [sl PRICE] - открыть колл\n"+
+			"/ccall CALLID [size] - закрыть колл по ID\n"+
+			"/sl CALLID [price] - установить/обновить стоп-лосс для колла\n"+
+			"/limit TICKER [b|s] PRICE % [CALLID](Опционально) - создать лимитный ордер\n"+
+			"/climit ORDERID - отменить лимитный ордер\n"+
+			"/myorders - показать активные лимитные ордера\n"+
+			"/mycalls - показать активные коллы с текущим PnL\n"+
+			"/allcalls - показать все коллы всех пользователей\n"+
+			"/rush - закрыть все открытые коллы пользователя\n"+
+			"/callstats - рейтинг трейдеров за 90 дней\n"+
+			"/mycallstats - персональная статистика коллов за 90 дней\n"+
+			"/mytrades - статистика по символам за 90 дней\n"+
+			"/history - история сработавших алертов\n"+
+			"/stats - статистика по активным алертам")
 	default:
 		// Игнорируем неизвестные команды и сообщения
 	}
@@ -1733,6 +1761,8 @@ func (b *TelegramBot) startMonitoring(ctx context.Context) {
 					b.checkAlerts(symbol, newPrice)
 					// Также проверяем резкие изменения цены
 					b.checkSharpChange(symbol, newPrice)
+					// проверяем лимитные ордера
+					b.checkLimitOrders(symbol, newPrice)
 
 					// Проверяем стоп-лоссы для открытых коллов
 					for _, call := range symbolCalls {
@@ -1764,6 +1794,11 @@ func (b *TelegramBot) startMonitoring(ctx context.Context) {
 								if err != nil {
 									logrus.WithError(err).WithField("call_id", call.ID).Error("failed to close call by stop-loss")
 								} else {
+									// Отменяем все лимитные ордера, связанные с этим коллом
+									err = b.st.CancelLimitOrdersByCallID(call.ID)
+									if err != nil {
+										logrus.WithError(err).Warn("failed to cancel limit orders after stop-loss")
+									}
 									b.reply(call.ChatID, slMsg)
 								}
 							}
@@ -1815,4 +1850,362 @@ func (b *TelegramBot) getPreferredExchangeMarketForSymbol(symbol string) (string
 		}
 	}
 	return "", ""
+}
+
+// cmdCreateLimitOrder обрабатывает команду /limit
+func (b *TelegramBot) cmdCreateLimitOrder(ctx context.Context, chatID, userID int64, username, text string) {
+	parts := strings.Fields(text)
+	if len(parts) < 5 {
+		b.reply(chatID, "Использование: /limit TICKER [b|s] PRICE DEPOSIT_PERCENT [CALL_ID]\n"+
+			"Примеры:\n"+
+			"/limit BTC b 120000 5 - открыть лонг при достижении 120000\n"+
+			"/limit BTC s 122000 50 abc123de - закрыть 50% колла abc123de при достижении 122000")
+		return
+	}
+
+	symbol := formatSymbol(parts[1])
+	directionStr := strings.ToLower(parts[2])
+
+	var direction string
+	if directionStr == "b" {
+		direction = "long"
+	} else if directionStr == "s" {
+		direction = "short"
+	} else {
+		b.reply(chatID, "Направление должно быть 'b' (buy/long) или 's' (sell/short)")
+		return
+	}
+
+	limitPrice, err := strconv.ParseFloat(parts[3], 64)
+	if err != nil || limitPrice <= 0 {
+		b.reply(chatID, "Неверная цена лимитного ордера")
+		return
+	}
+
+	depositPercent, err := strconv.ParseFloat(parts[4], 64)
+	if err != nil || depositPercent <= 0 {
+		b.reply(chatID, "Неверный процент депозита")
+		return
+	}
+
+	var relatedCallID string
+	var sizeToClose float64
+
+	// Если указан ID колла - это ордер на закрытие
+	if len(parts) >= 6 {
+		relatedCallID = parts[5]
+
+		// Проверяем существование колла
+		call, err := b.st.GetCallByID(relatedCallID, userID)
+		if err != nil {
+			b.reply(chatID, "Колл не найден или не принадлежит вам")
+			return
+		}
+
+		if call.Status != "open" {
+			b.reply(chatID, "Нельзя создать лимитный ордер для закрытого колла")
+			return
+		}
+
+		// Проверяем совпадение символа
+		if call.Symbol != symbol {
+			b.reply(chatID, fmt.Sprintf("Символ ордера (%s) не совпадает с символом колла (%s)", symbol, call.Symbol))
+			return
+		}
+
+		// depositPercent в этом случае - процент от позиции для закрытия
+		if depositPercent > 100 {
+			b.reply(chatID, "Процент для закрытия не может быть больше 100")
+			return
+		}
+
+		sizeToClose = call.Size * (depositPercent / 100)
+
+		// Проверяем направление: для лонга используем sell, для шорта - buy
+		expectedDirection := "short"
+		if call.Direction == "short" {
+			expectedDirection = "long"
+		}
+
+		if direction != expectedDirection {
+			b.reply(chatID, fmt.Sprintf("Для закрытия %s позиции используйте направление %s",
+				call.Direction,
+				map[string]string{"long": "b", "short": "s"}[expectedDirection]))
+			return
+		}
+	}
+
+	// Получаем текущую цену для информации
+	preferredExchange, preferredMarket := b.getPreferredExchangeMarketForSymbol(symbol)
+	priceInfo, err := prices.FetchPriceInfo(b.pricesClients, symbol, preferredExchange, preferredMarket)
+	if err != nil {
+		b.reply(chatID, "Ошибка получения текущей цены для "+symbol+": "+err.Error())
+		return
+	}
+
+	// Создаем лимитный ордер
+	order := alerts.LimitOrder{
+		UserID:         userID,
+		Username:       username,
+		ChatID:         chatID,
+		Symbol:         symbol,
+		Direction:      direction,
+		LimitPrice:     limitPrice,
+		DepositPercent: depositPercent,
+		RelatedCallID:  relatedCallID,
+		SizeToClose:    sizeToClose,
+	}
+
+	order, err = b.st.CreateLimitOrder(order)
+	if err != nil {
+		b.reply(chatID, "Ошибка создания лимитного ордера: "+err.Error())
+		return
+	}
+
+	// Формируем сообщение
+	var msg string
+	directionRus := map[string]string{"long": "Long", "short": "Short"}[direction]
+
+	if relatedCallID != "" {
+		msg = fmt.Sprintf("✅ Лимитный ордер создан!\nID: `%s`\nСимвол: %s\nТип: Закрытие %.0f%% колла `%s`\nЦена: %s\nТекущая цена: %s",
+			order.ID, symbol, depositPercent, relatedCallID,
+			prices.FormatPrice(limitPrice), prices.FormatPrice(priceInfo.CurrentPrice))
+	} else {
+		msg = fmt.Sprintf("✅ Лимитный ордер создан!\nID: `%s`\nСимвол: %s\nНаправление: %s\nЦена: %s\nРазмер: %.0f%% депозита\nТекущая цена: %s",
+			order.ID, symbol, directionRus, prices.FormatPrice(limitPrice),
+			depositPercent, prices.FormatPrice(priceInfo.CurrentPrice))
+	}
+
+	b.reply(chatID, msg)
+
+	// Перезапускаем мониторинг для учета новых ордеров
+	b.restartMonitoring(ctx)
+}
+
+// cmdCancelLimitOrder обрабатывает команду /climit
+func (b *TelegramBot) cmdCancelLimitOrder(ctx context.Context, chatID, userID int64, text string) {
+	parts := strings.Fields(text)
+	if len(parts) != 2 {
+		b.reply(chatID, "Использование: /climit ORDER_ID\nПример: /climit `abc123de`")
+		return
+	}
+
+	orderID := parts[1]
+
+	err := b.st.CancelLimitOrder(orderID, userID)
+	if err != nil {
+		b.reply(chatID, "Ошибка отмены ордера: "+err.Error())
+		return
+	}
+
+	b.reply(chatID, fmt.Sprintf("❌ Лимитный ордер `%s` отменен", orderID))
+}
+
+// cmdMyOrders показывает активные лимитные ордера пользователя
+func (b *TelegramBot) cmdMyOrders(ctx context.Context, chatID, userID int64) {
+	orders := b.st.GetUserLimitOrders(userID)
+	if len(orders) == 0 {
+		b.reply(chatID, "У вас нет активных лимитных ордеров")
+		return
+	}
+
+	// Группируем ордера по символам
+	ordersBySymbol := make(map[string][]alerts.LimitOrder)
+	for _, order := range orders {
+		ordersBySymbol[order.Symbol] = append(ordersBySymbol[order.Symbol], order)
+	}
+
+	// Получаем отсортированные символы
+	symbols := make([]string, 0, len(ordersBySymbol))
+	for symbol := range ordersBySymbol {
+		symbols = append(symbols, symbol)
+	}
+	sort.Strings(symbols)
+
+	var msg strings.Builder
+	msg.WriteString("📋 *Ваши активные лимитные ордера:*\n\n")
+
+	for idx, symbol := range symbols {
+		symbolOrders := ordersBySymbol[symbol]
+
+		// Получаем текущую цену
+		preferredExchange, preferredMarket := b.getPreferredExchangeMarketForSymbol(symbol)
+		priceInfo, err := prices.FetchCurrentPrice(b.pricesClients, symbol, preferredExchange, preferredMarket)
+		currentPrice := 0.0
+		if err == nil {
+			currentPrice = priceInfo.CurrentPrice
+		}
+
+		msg.WriteString(fmt.Sprintf("%d. *%s*", idx+1, symbol))
+		if currentPrice > 0 {
+			msg.WriteString(fmt.Sprintf(" (текущая: %s)", prices.FormatPrice(currentPrice)))
+		}
+		msg.WriteString("\n\n")
+
+		// Сортируем ордера по цене
+		sort.Slice(symbolOrders, func(i, j int) bool {
+			return symbolOrders[i].LimitPrice < symbolOrders[j].LimitPrice
+		})
+
+		for i, order := range symbolOrders {
+			directionRus := map[string]string{"long": "Long", "short": "Short"}[order.Direction]
+
+			var orderType string
+			if order.RelatedCallID != "" {
+				orderType = fmt.Sprintf("Закрытие %.0f%% колла `%s`",
+					(order.SizeToClose/100)*100, order.RelatedCallID)
+			} else {
+				orderType = fmt.Sprintf("%s %.0f%%", directionRus, order.DepositPercent)
+			}
+
+			// Рассчитываем разницу с текущей ценой
+			var priceDiff string
+			if currentPrice > 0 {
+				diff := ((order.LimitPrice - currentPrice) / currentPrice) * 100
+				sign := "+"
+				if diff < 0 {
+					sign = ""
+				}
+				priceDiff = fmt.Sprintf(" (%s%.1f%%)", sign, diff)
+			}
+
+			msg.WriteString(fmt.Sprintf("   %d. ID: `%s`\n", i+1, order.ID))
+			msg.WriteString(fmt.Sprintf("      Тип: %s\n", orderType))
+			msg.WriteString(fmt.Sprintf("      Цена: %s%s\n", prices.FormatPrice(order.LimitPrice), priceDiff))
+		}
+		msg.WriteString("\n")
+	}
+
+	b.reply(chatID, msg.String())
+}
+
+// checkLimitOrders проверяет и исполняет лимитные ордера
+func (b *TelegramBot) checkLimitOrders(symbol string, currentPrice float64) {
+	orders := b.st.GetLimitOrdersBySymbol(symbol)
+	if len(orders) == 0 {
+		return
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"symbol": symbol,
+		"price":  currentPrice,
+		"count":  len(orders),
+	}).Debug("checking limit orders for symbol")
+
+	for _, order := range orders {
+		triggered := false
+
+		// Проверяем условия исполнения
+		// Для long (buy): цена опустилась до/ниже лимитной
+		// Для short (sell): цена поднялась до/выше лимитной
+		if order.Direction == "long" && currentPrice <= order.LimitPrice {
+			triggered = true
+		} else if order.Direction == "short" && currentPrice >= order.LimitPrice {
+			triggered = true
+		}
+
+		if !triggered {
+			continue
+		}
+
+		logrus.WithFields(logrus.Fields{
+			"order_id":        order.ID,
+			"symbol":          order.Symbol,
+			"direction":       order.Direction,
+			"limit_price":     order.LimitPrice,
+			"current_price":   currentPrice,
+			"related_call_id": order.RelatedCallID,
+		}).Info("limit order triggered")
+
+		var msg string
+
+		// Если это ордер на закрытие колла
+		if order.RelatedCallID != "" {
+			// Получаем информацию о колле
+			call, err := b.st.GetCallByID(order.RelatedCallID, order.UserID)
+			if err != nil {
+				logrus.WithError(err).WithField("order_id", order.ID).Error("failed to get call for limit order")
+				b.st.CancelLimitOrder(order.ID, order.UserID)
+				continue
+			}
+
+			if call.Status != "open" {
+				logrus.WithField("order_id", order.ID).Warn("call already closed, cancelling limit order")
+				b.st.CancelLimitOrder(order.ID, order.UserID)
+				continue
+			}
+
+			// Закрываем позицию
+			err = b.st.CloseCall(order.RelatedCallID, order.UserID, currentPrice, order.SizeToClose)
+			if err != nil {
+				logrus.WithError(err).WithField("order_id", order.ID).Error("failed to close call by limit order")
+				msg = fmt.Sprintf("⚠️ Ошибка исполнения лимитного ордера `%s`: %s", order.ID, err.Error())
+			} else {
+				// Получаем обновленную информацию о колле
+				updatedCall, _ := b.st.GetCallByID(order.RelatedCallID, order.UserID)
+
+				pnlSign := "+"
+				var pnl float64
+				if updatedCall != nil {
+					pnl = updatedCall.PnlPercent
+					if pnl < 0 {
+						pnlSign = ""
+					}
+				}
+
+				if updatedCall != nil && updatedCall.Status == "closed" {
+					msg = fmt.Sprintf("✅ Лимитный ордер `%s` исполнен!\nКолл `%s` (%s) полностью закрыт по цене %s\nPnL: %s%.2f%%",
+						order.ID, order.RelatedCallID, symbol,
+						prices.FormatPrice(currentPrice), pnlSign, pnl)
+				} else {
+					msg = fmt.Sprintf("✅ Лимитный ордер `%s` исполнен!\nЗакрыто %.0f%% колла `%s` (%s) по цене %s\nPnL на закрытую часть: %s%.2f%%",
+						order.ID, (order.SizeToClose/call.Size)*100,
+						order.RelatedCallID, symbol, prices.FormatPrice(currentPrice), pnlSign, pnl)
+				}
+
+				// Помечаем ордер как исполненный
+				b.st.TriggerLimitOrder(order.ID)
+			}
+		} else {
+			// Это ордер на открытие позиции
+			preferredExchange, preferredMarket := b.getPreferredExchangeMarketForSymbol(symbol)
+			priceInfo, err := prices.FetchPriceInfo(b.pricesClients, symbol, preferredExchange, preferredMarket)
+			if err != nil {
+				logrus.WithError(err).WithField("order_id", order.ID).Error("failed to get price info for limit order")
+				continue
+			}
+
+			// Создаем новый колл
+			call := alerts.Call{
+				UserID:         order.UserID,
+				Username:       order.Username,
+				ChatID:         order.ChatID,
+				Symbol:         symbol,
+				Direction:      order.Direction,
+				EntryPrice:     currentPrice,
+				Market:         priceInfo.Market,
+				DepositPercent: order.DepositPercent,
+				Exchange:       priceInfo.Exchange,
+			}
+
+			call, err = b.st.OpenCall(call)
+			if err != nil {
+				logrus.WithError(err).WithField("order_id", order.ID).Error("failed to open call by limit order")
+				msg = fmt.Sprintf("⚠️ Ошибка исполнения лимитного ордера `%s`: %s", order.ID, err.Error())
+			} else {
+				directionRus := map[string]string{"long": "Long", "short": "Short"}[order.Direction]
+				msg = fmt.Sprintf("✅ Лимитный ордер `%s` исполнен!\nОткрыт колл `%s`\nСимвол: %s\nНаправление: %s\nЦена входа: %s\nРазмер: %.0f%%",
+					order.ID, call.ID, symbol, directionRus,
+					prices.FormatPrice(currentPrice), order.DepositPercent)
+
+				// Помечаем ордер как исполненный
+				b.st.TriggerLimitOrder(order.ID)
+			}
+		}
+
+		// Отправляем уведомление пользователю
+		if msg != "" {
+			b.reply(order.ChatID, msg)
+		}
+	}
 }

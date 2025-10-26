@@ -136,6 +136,26 @@ func (s *DatabaseStorage) GetPendingReminders() ([]reminder.Task, error) {
 
 func (s *DatabaseStorage) migrate() error {
 	queries := []string{
+		`CREATE TABLE IF NOT EXISTS limit_orders (
+			id TEXT PRIMARY KEY,
+			user_id INTEGER NOT NULL,
+			username TEXT NOT NULL,
+			chat_id INTEGER NOT NULL,
+			symbol TEXT NOT NULL,
+			direction TEXT NOT NULL,
+			limit_price REAL NOT NULL,
+			deposit_percent REAL DEFAULT 0,
+			related_call_id TEXT DEFAULT '',
+			size_to_close REAL DEFAULT 0,
+			status TEXT NOT NULL DEFAULT 'active',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			triggered_at DATETIME
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_limit_orders_user_id ON limit_orders(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_limit_orders_status ON limit_orders(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_limit_orders_symbol ON limit_orders(symbol)`,
+		`CREATE INDEX IF NOT EXISTS idx_limit_orders_related_call_id ON limit_orders(related_call_id)`,
+
 		`CREATE TABLE IF NOT EXISTS reminders (
 			id TEXT PRIMARY KEY,
 			chat_id INTEGER NOT NULL,
@@ -241,6 +261,7 @@ func (s *DatabaseStorage) migrate() error {
 	if err != nil {
 		logrus.WithError(err).Warn("failed to update old calls with default size")
 	}
+
 	for _, query := range queries {
 		if _, err := s.db.Exec(query); err != nil {
 			// Игнорируем ошибки добавления колонок если они уже существуют
@@ -252,6 +273,22 @@ func (s *DatabaseStorage) migrate() error {
 
 	logrus.Info("database migration completed")
 	return nil
+}
+
+type LimitOrder struct {
+	ID             string     `json:"id"`
+	UserID         int64      `json:"user_id"`
+	Username       string     `json:"username"`
+	ChatID         int64      `json:"chat_id"`
+	Symbol         string     `json:"symbol"`
+	Direction      string     `json:"direction"` // "long" или "short"
+	LimitPrice     float64    `json:"limit_price"`
+	DepositPercent float64    `json:"deposit_percent"`
+	RelatedCallID  string     `json:"related_call_id,omitempty"` // ID колла для закрытия (если указан)
+	SizeToClose    float64    `json:"size_to_close,omitempty"`   // Размер для закрытия (если это ордер на закрытие)
+	Status         string     `json:"status"`                    // "active", "triggered", "cancelled"
+	CreatedAt      time.Time  `json:"created_at"`
+	TriggeredAt    *time.Time `json:"triggered_at,omitempty"`
 }
 
 func (s *DatabaseStorage) Add(alert Alert) (Alert, error) {
@@ -474,12 +511,13 @@ func (s *DatabaseStorage) GetBySymbol(symbol string) []Alert {
 }
 
 func (s *DatabaseStorage) GetAllSymbols() []string {
-	// Получаем символы из алертов и открытых коллов
 	rows, err := s.db.Query(`
 		SELECT DISTINCT symbol FROM (
 			SELECT symbol FROM alerts WHERE symbol != ''
 			UNION
 			SELECT symbol FROM calls WHERE symbol != '' AND status = 'open'
+			UNION
+			SELECT symbol FROM limit_orders WHERE symbol != '' AND status = 'active'
 		) ORDER BY symbol`)
 
 	if err != nil {
@@ -498,7 +536,7 @@ func (s *DatabaseStorage) GetAllSymbols() []string {
 		symbols = append(symbols, symbol)
 	}
 
-	logrus.WithField("symbols", symbols).Debug("retrieved symbols from alerts and open calls")
+	logrus.WithField("symbols", symbols).Debug("retrieved symbols from alerts, calls and limit orders")
 	return symbols
 }
 
@@ -674,7 +712,13 @@ func (s *DatabaseStorage) CloseCall(callID string, userID int64, exitPrice float
 	if err != nil {
 		return err
 	}
-
+	// Если колл полностью закрыт, отменяем все связанные лимитные ордера
+	if status == "closed" {
+		err = s.CancelLimitOrdersByCallID(callID)
+		if err != nil {
+			logrus.WithError(err).Warn("failed to cancel limit orders for closed call")
+		}
+	}
 	logrus.WithFields(logrus.Fields{
 		"call_id":     callID,
 		"user_id":     userID,
@@ -1198,4 +1242,234 @@ func (s *DatabaseStorage) GetPreferredExchangeMarketForSymbol(symbol string) (st
 	}
 
 	return "", ""
+}
+
+// CreateLimitOrder создает новый лимитный ордер
+func (s *DatabaseStorage) CreateLimitOrder(order LimitOrder) (LimitOrder, error) {
+	if order.ID == "" {
+		for {
+			order.ID = generateShortID()
+			var exists bool
+			err := s.db.QueryRow("SELECT EXISTS(SELECT 1 FROM limit_orders WHERE id = ?)", order.ID).Scan(&exists)
+			if err != nil {
+				return order, err
+			}
+			if !exists {
+				break
+			}
+		}
+	}
+
+	if order.CreatedAt.IsZero() {
+		order.CreatedAt = time.Now()
+	}
+
+	order.Status = "active"
+
+	_, err := s.db.Exec(`
+		INSERT INTO limit_orders (id, user_id, username, chat_id, symbol, direction, limit_price, 
+		                          deposit_percent, related_call_id, size_to_close, status, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		order.ID, order.UserID, order.Username, order.ChatID, order.Symbol, order.Direction,
+		order.LimitPrice, order.DepositPercent, order.RelatedCallID, order.SizeToClose,
+		order.Status, order.CreatedAt)
+
+	if err != nil {
+		return order, err
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"order_id":        order.ID,
+		"user_id":         order.UserID,
+		"symbol":          order.Symbol,
+		"direction":       order.Direction,
+		"limit_price":     order.LimitPrice,
+		"related_call_id": order.RelatedCallID,
+	}).Info("limit order created")
+
+	return order, nil
+}
+
+// GetActiveLimitOrders возвращает все активные лимитные ордера
+func (s *DatabaseStorage) GetActiveLimitOrders() []LimitOrder {
+	rows, err := s.db.Query(`
+		SELECT id, user_id, username, chat_id, symbol, direction, limit_price, 
+		       deposit_percent, COALESCE(related_call_id, ''), COALESCE(size_to_close, 0), 
+		       status, created_at, triggered_at
+		FROM limit_orders
+		WHERE status = 'active'
+		ORDER BY created_at ASC`)
+
+	if err != nil {
+		logrus.WithError(err).Warn("failed to get active limit orders")
+		return nil
+	}
+	defer rows.Close()
+
+	var orders []LimitOrder
+	for rows.Next() {
+		var order LimitOrder
+		var triggeredAt sql.NullTime
+		err := rows.Scan(&order.ID, &order.UserID, &order.Username, &order.ChatID,
+			&order.Symbol, &order.Direction, &order.LimitPrice, &order.DepositPercent,
+			&order.RelatedCallID, &order.SizeToClose, &order.Status, &order.CreatedAt, &triggeredAt)
+		if err != nil {
+			logrus.WithError(err).Warn("failed to scan limit order row")
+			continue
+		}
+		if triggeredAt.Valid {
+			order.TriggeredAt = &triggeredAt.Time
+		}
+		orders = append(orders, order)
+	}
+
+	return orders
+}
+
+// GetUserLimitOrders возвращает активные лимитные ордера пользователя
+func (s *DatabaseStorage) GetUserLimitOrders(userID int64) []LimitOrder {
+	rows, err := s.db.Query(`
+		SELECT id, user_id, username, chat_id, symbol, direction, limit_price, 
+		       deposit_percent, COALESCE(related_call_id, ''), COALESCE(size_to_close, 0), 
+		       status, created_at, triggered_at
+		FROM limit_orders
+		WHERE user_id = ? AND status = 'active'
+		ORDER BY created_at ASC`, userID)
+
+	if err != nil {
+		logrus.WithError(err).Warn("failed to get user limit orders")
+		return nil
+	}
+	defer rows.Close()
+
+	var orders []LimitOrder
+	for rows.Next() {
+		var order LimitOrder
+		var triggeredAt sql.NullTime
+		err := rows.Scan(&order.ID, &order.UserID, &order.Username, &order.ChatID,
+			&order.Symbol, &order.Direction, &order.LimitPrice, &order.DepositPercent,
+			&order.RelatedCallID, &order.SizeToClose, &order.Status, &order.CreatedAt, &triggeredAt)
+		if err != nil {
+			logrus.WithError(err).Warn("failed to scan limit order row")
+			continue
+		}
+		if triggeredAt.Valid {
+			order.TriggeredAt = &triggeredAt.Time
+		}
+		orders = append(orders, order)
+	}
+
+	return orders
+}
+
+// CancelLimitOrder отменяет лимитный ордер
+func (s *DatabaseStorage) CancelLimitOrder(orderID string, userID int64) error {
+	result, err := s.db.Exec(`
+		UPDATE limit_orders
+		SET status = 'cancelled'
+		WHERE id = ? AND user_id = ? AND status = 'active'`,
+		orderID, userID)
+
+	if err != nil {
+		return err
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if affected == 0 {
+		return errors.New("ордер не найден или уже отменен")
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"order_id": orderID,
+		"user_id":  userID,
+	}).Info("limit order cancelled")
+
+	return nil
+}
+
+// TriggerLimitOrder помечает ордер как исполненный
+func (s *DatabaseStorage) TriggerLimitOrder(orderID string) error {
+	now := time.Now()
+	_, err := s.db.Exec(`
+		UPDATE limit_orders
+		SET status = 'triggered', triggered_at = ?
+		WHERE id = ? AND status = 'active'`,
+		now, orderID)
+
+	if err != nil {
+		return err
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"order_id": orderID,
+	}).Info("limit order triggered")
+
+	return nil
+}
+
+// CancelLimitOrdersByCallID отменяет все лимитные ордера, связанные с коллом
+func (s *DatabaseStorage) CancelLimitOrdersByCallID(callID string) error {
+	result, err := s.db.Exec(`
+		UPDATE limit_orders
+		SET status = 'cancelled'
+		WHERE related_call_id = ? AND status = 'active'`,
+		callID)
+
+	if err != nil {
+		return err
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if affected > 0 {
+		logrus.WithFields(logrus.Fields{
+			"call_id": callID,
+			"count":   affected,
+		}).Info("limit orders cancelled by call id")
+	}
+
+	return nil
+}
+
+// GetLimitOrdersBySymbol возвращает активные ордера по символу
+func (s *DatabaseStorage) GetLimitOrdersBySymbol(symbol string) []LimitOrder {
+	rows, err := s.db.Query(`
+		SELECT id, user_id, username, chat_id, symbol, direction, limit_price, 
+		       deposit_percent, COALESCE(related_call_id, ''), COALESCE(size_to_close, 0), 
+		       status, created_at, triggered_at
+		FROM limit_orders
+		WHERE symbol = ? AND status = 'active'
+		ORDER BY created_at ASC`, symbol)
+
+	if err != nil {
+		logrus.WithError(err).Warn("failed to get limit orders by symbol")
+		return nil
+	}
+	defer rows.Close()
+
+	var orders []LimitOrder
+	for rows.Next() {
+		var order LimitOrder
+		var triggeredAt sql.NullTime
+		err := rows.Scan(&order.ID, &order.UserID, &order.Username, &order.ChatID,
+			&order.Symbol, &order.Direction, &order.LimitPrice, &order.DepositPercent,
+			&order.RelatedCallID, &order.SizeToClose, &order.Status, &order.CreatedAt, &triggeredAt)
+		if err != nil {
+			logrus.WithError(err).Warn("failed to scan limit order row")
+			continue
+		}
+		if triggeredAt.Valid {
+			order.TriggeredAt = &triggeredAt.Time
+		}
+		orders = append(orders, order)
+	}
+
+	return orders
 }
