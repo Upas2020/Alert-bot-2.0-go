@@ -15,20 +15,110 @@ import (
 
 // ExchangeClients содержит HTTP клиенты для различных бирж.
 type ExchangeClients struct {
-	BitgetClient *http.Client
-	BybitClient  *http.Client
+	VariationalClient *http.Client
+	BitgetClient      *http.Client
+	BybitClient       *http.Client
 }
 
 // NewExchangeClients создает и инициализирует клиенты для бирж.
 func NewExchangeClients(cfg config.Config) *ExchangeClients {
+	variationalClient := &http.Client{Timeout: 10 * time.Second}
 	bitgetClient := &http.Client{Timeout: 10 * time.Second}
 	bybitClient := &http.Client{Timeout: 10 * time.Second}
 
 	return &ExchangeClients{
-		BitgetClient: bitgetClient,
-		BybitClient:  bybitClient,
+		VariationalClient: variationalClient,
+		BitgetClient:      bitgetClient,
+		BybitClient:       bybitClient,
 	}
 }
+
+// --- Variational API types ---
+
+// VariationalStatsResponse описывает ответ Variational API /metadata/stats
+type VariationalStatsResponse struct {
+	TotalVolume24h   string               `json:"total_volume_24h"`
+	CumulativeVolume string               `json:"cumulative_volume"`
+	TVL              string               `json:"tvl"`
+	OpenInterest     string               `json:"open_interest"`
+	NumMarkets       int                  `json:"num_markets"`
+	Listings         []VariationalListing `json:"listings"`
+}
+
+// VariationalListing структура одного листинга в ответе Variational API
+type VariationalListing struct {
+	Ticker          string `json:"ticker"`
+	Name            string `json:"name"`
+	MarkPrice       string `json:"mark_price"`
+	Volume24h       string `json:"volume_24h"`
+	FundingRate     string `json:"funding_rate"`
+	FundingInterval int    `json:"funding_interval_s"`
+}
+
+const variationalBaseURL = "https://omni-client-api.prod.ap-northeast-1.variational.io"
+
+// fetchVariationalPrice получает цену с Variational по тикеру.
+// Variational хранит тикеры без суффикса (BTC, ETH), поэтому обрезаем USDT/USDC если есть.
+func fetchVariationalPrice(client *http.Client, symbol string) (float64, error) {
+	// Нормализуем символ: убираем USDT/USDC суффикс, если есть
+	ticker := strings.ToUpper(symbol)
+	for _, suffix := range []string{"USDT", "USDC", "PERP"} {
+		ticker = strings.TrimSuffix(ticker, suffix)
+	}
+
+	url := fmt.Sprintf("%s/metadata/stats", variationalBaseURL)
+
+	logrus.WithFields(logrus.Fields{
+		"url":    url,
+		"ticker": ticker,
+		"source": "Variational futures",
+	}).Debug("variational request")
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return 0, err
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return 0, fmt.Errorf("variational http status %d", resp.StatusCode)
+	}
+
+	var response VariationalStatsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return 0, fmt.Errorf("failed to decode variational response: %w", err)
+	}
+
+	if len(response.Listings) == 0 {
+		return 0, fmt.Errorf("no listings in variational response")
+	}
+
+	for _, listing := range response.Listings {
+		if strings.ToUpper(listing.Ticker) == ticker {
+			price, err := parseFloat(listing.MarkPrice)
+			if err != nil {
+				return 0, fmt.Errorf("failed to parse variational mark price '%s': %w", listing.MarkPrice, err)
+			}
+
+			logrus.WithFields(logrus.Fields{
+				"ticker": listing.Ticker,
+				"price":  price,
+				"source": "Variational futures",
+			}).Debug("variational parsed listing successfully")
+
+			return price, nil
+		}
+	}
+
+	return 0, fmt.Errorf("symbol %s (ticker: %s) not found in variational response", symbol, ticker)
+}
+
+// --- Bitget API types ---
 
 // BitgetTickerResponse описывает ответ Bitget API v2 для тикеров
 type BitgetTickerResponse struct {
@@ -70,6 +160,8 @@ type BitgetCandleResponse struct {
 	Data        [][]string `json:"data"` // Массив массивов строк [timestamp, open, high, low, close, volume, quoteVolume, usdtVolume]
 }
 
+// --- Bybit API types ---
+
 // BybitTickerResponse описывает ответ Bybit API для тикеров
 type BybitTickerResponse struct {
 	RetCode int    `json:"retCode"`
@@ -106,6 +198,8 @@ type BybitCandleResponse struct {
 	Time int64 `json:"time"`
 }
 
+// --- Common types ---
+
 // PriceInfo содержит информацию о цене и изменениях
 type PriceInfo struct {
 	CurrentPrice float64
@@ -119,9 +213,11 @@ type PriceInfo struct {
 // FetchPriceInfoResult содержит информацию о цене и источнике
 type FetchPriceInfoResult struct {
 	PriceInfo
-	Exchange string // "Bitget" или "Bybit"
+	Exchange string // "Variational", "Bitget" или "Bybit"
 	Market   string // "spot" или "futures"
 }
+
+// --- Bitget helpers ---
 
 // fetchWithURL общая функция для получения данных с Bitget
 func fetchWithURL(client *http.Client, url, symbol, source string) (float64, error) {
@@ -287,17 +383,29 @@ func parseFloat(s string) (float64, error) {
 
 // FormatPrice форматирует цену, убирая лишние нули
 func FormatPrice(price float64) string {
-	// Используем strconv.FormatFloat с 'g' для автоматического убирания лишних нулей
-	formatted := strconv.FormatFloat(price, 'g', -1, 64)
-
-	// Проверяем, не получилась ли экспоненциальная запись для маленьких чисел
-	if strings.Contains(formatted, "e") && price > 0.000001 {
-		// Для чисел больше 0.000001 используем фиксированный формат
-		formatted = strconv.FormatFloat(price, 'f', -1, 64)
+	var formatted string
+	switch {
+	case price >= 1000:
+		formatted = strconv.FormatFloat(price, 'f', 2, 64)
+		formatted = strings.TrimRight(formatted, "0")
+		formatted = strings.TrimRight(formatted, ".")
+	case price >= 1:
+		formatted = strconv.FormatFloat(price, 'f', 4, 64)
+		formatted = strings.TrimRight(formatted, "0")
+		formatted = strings.TrimRight(formatted, ".")
+	case price >= 0.01:
+		formatted = strconv.FormatFloat(price, 'f', 6, 64)
+		formatted = strings.TrimRight(formatted, "0")
+		formatted = strings.TrimRight(formatted, ".")
+	case price >= 0.0001:
+		formatted = strconv.FormatFloat(price, 'f', 8, 64)
+		formatted = strings.TrimRight(formatted, "0")
+		formatted = strings.TrimRight(formatted, ".")
+	default:
+		formatted = strconv.FormatFloat(price, 'f', 10, 64)
 		formatted = strings.TrimRight(formatted, "0")
 		formatted = strings.TrimRight(formatted, ".")
 	}
-
 	return formatted
 }
 
@@ -331,6 +439,8 @@ func min(a, b int) int {
 	return b
 }
 
+// --- Bitget price fetchers ---
+
 // fetchBitgetSpotPriceOnly получает цену только со спота Bitget
 func fetchBitgetSpotPriceOnly(client *http.Client, symbol string) (float64, error) {
 	// Пробуем сначала API v2 для одного символа
@@ -362,6 +472,8 @@ func fetchBitgetFuturesPrice(client *http.Client, symbol string) (float64, error
 	url = "https://api.bitget.com/api/v2/mix/market/tickers?productType=USDT-FUTURES"
 	return fetchWithURL(client, url, symbol, "Bitget futures")
 }
+
+// --- Bybit price fetchers ---
 
 // FetchBybitSpotPrice получает цену только со спота Bybit
 func FetchBybitSpotPrice(client *http.Client, symbol string) (float64, error) {
@@ -466,6 +578,8 @@ func fetchBybitWithURL(client *http.Client, url, symbol, source string) (float64
 	return 0, fmt.Errorf("symbol %s not found in bybit %s response", symbol, source)
 }
 
+// --- Bybit historical helpers ---
+
 // fetchBybitHistoricalWithURL общая функция для получения исторических данных с Bybit
 func fetchBybitHistoricalWithURL(client *http.Client, url, symbol, source string) (float64, error) {
 	logrus.WithFields(logrus.Fields{
@@ -521,6 +635,8 @@ func fetchBybitHistoricalWithURL(client *http.Client, url, symbol, source string
 	return closePrice, nil
 }
 
+// --- Bitget historical fetchers ---
+
 // fetchHistoricalPriceBitgetSpot получает историческую цену со спота Bitget
 func fetchHistoricalPriceBitgetSpot(client *http.Client, symbol string, timestamp time.Time) (float64, error) {
 	endTime := timestamp.UnixMilli()
@@ -575,7 +691,10 @@ func FetchBybitHistoricalPrice(client *http.Client, symbol string, timestamp tim
 	return fetchBybitHistoricalWithURL(client, url, symbol, "Bybit "+category)
 }
 
-// FetchPriceInfo получает подробную информацию о цене с изменениями за разные периоды, проверяя биржи в порядке приоритета.
+// --- Main public functions ---
+
+// FetchPriceInfo получает подробную информацию о цене с изменениями за разные периоды,
+// проверяя биржи в порядке приоритета: Variational → Bitget → Bybit.
 func FetchPriceInfo(clients *ExchangeClients, symbol string, preferredExchange, preferredMarket string) (*FetchPriceInfoResult, error) {
 	var currentPrice float64
 	var sourceExchange, sourceMarket string
@@ -589,6 +708,16 @@ func FetchPriceInfo(clients *ExchangeClients, symbol string, preferredExchange, 
 		}).Debug("attempting to fetch price from preferred source")
 
 		switch preferredExchange {
+		case "Variational":
+			if preferredMarket == "futures" {
+				currentPrice, err = fetchVariationalPrice(clients.VariationalClient, symbol)
+				if err == nil {
+					sourceExchange = "Variational"
+					sourceMarket = "futures"
+				} else {
+					logrus.WithError(err).WithField("symbol", symbol).Warn("Variational price fetch failed, trying Bitget spot")
+				}
+			}
 		case "Bitget":
 			if preferredMarket == "spot" {
 				currentPrice, err = fetchBitgetSpotPriceOnly(clients.BitgetClient, symbol)
@@ -624,21 +753,16 @@ func FetchPriceInfo(clients *ExchangeClients, symbol string, preferredExchange, 
 				CurrentPrice: currentPrice,
 				Source:       fmt.Sprintf("%s %s", sourceExchange, sourceMarket),
 			}
-			// Получаем исторические цены для разных периодов
 			now := time.Now()
-			// 15 минут назад
 			if price15m, err := FetchHistoricalPrice(clients, symbol, now.Add(-15*time.Minute), sourceExchange, sourceMarket); err == nil {
 				priceInfo.Change15m = calculateChangePercent(price15m, currentPrice)
 			}
-			// 1 час назад
 			if price1h, err := FetchHistoricalPrice(clients, symbol, now.Add(-1*time.Hour), sourceExchange, sourceMarket); err == nil {
 				priceInfo.Change1h = calculateChangePercent(price1h, currentPrice)
 			}
-			// 4 часа назад
 			if price4h, err := FetchHistoricalPrice(clients, symbol, now.Add(-4*time.Hour), sourceExchange, sourceMarket); err == nil {
 				priceInfo.Change4h = calculateChangePercent(price4h, currentPrice)
 			}
-			// 24 часа назад
 			if price24h, err := FetchHistoricalPrice(clients, symbol, now.Add(-24*time.Hour), sourceExchange, sourceMarket); err == nil {
 				priceInfo.Change24h = calculateChangePercent(price24h, currentPrice)
 			}
@@ -650,38 +774,47 @@ func FetchPriceInfo(clients *ExchangeClients, symbol string, preferredExchange, 
 		}).Debug("failed to fetch price from preferred source, trying all sources")
 	}
 
-	// Если нет предпочтительной биржи/рынка или она не сработала, пробуем по порядку:
-	// 1. Bitget spot
-	currentPrice, err = fetchBitgetSpotPriceOnly(clients.BitgetClient, symbol)
+	// Fallback: пробуем все источники по порядку приоритета:
+	// 1. Variational futures
+	currentPrice, err = fetchVariationalPrice(clients.VariationalClient, symbol)
 	if err == nil {
-		sourceExchange = "Bitget"
-		sourceMarket = "spot"
+		sourceExchange = "Variational"
+		sourceMarket = "futures"
 	} else {
-		logrus.WithError(err).WithField("symbol", symbol).Debug("Bitget spot price fetch failed, trying Bitget futures")
+		logrus.WithError(err).WithField("symbol", symbol).Debug("Variational price fetch failed, trying Bitget spot")
 
-		// 2. Bitget futures
-		currentPrice, err = fetchBitgetFuturesPrice(clients.BitgetClient, symbol)
+		// 2. Bitget spot
+		currentPrice, err = fetchBitgetSpotPriceOnly(clients.BitgetClient, symbol)
 		if err == nil {
 			sourceExchange = "Bitget"
-			sourceMarket = "futures"
+			sourceMarket = "spot"
 		} else {
-			logrus.WithError(err).WithField("symbol", symbol).Debug("Bitget futures price fetch failed, trying Bybit spot")
+			logrus.WithError(err).WithField("symbol", symbol).Debug("Bitget spot price fetch failed, trying Bitget futures")
 
-			// 3. Bybit spot
-			currentPrice, err = FetchBybitSpotPrice(clients.BybitClient, symbol)
+			// 3. Bitget futures
+			currentPrice, err = fetchBitgetFuturesPrice(clients.BitgetClient, symbol)
 			if err == nil {
-				sourceExchange = "Bybit"
-				sourceMarket = "spot"
+				sourceExchange = "Bitget"
+				sourceMarket = "futures"
 			} else {
-				logrus.WithError(err).WithField("symbol", symbol).Debug("Bybit spot price fetch failed, trying Bybit futures")
+				logrus.WithError(err).WithField("symbol", symbol).Debug("Bitget futures price fetch failed, trying Bybit spot")
 
-				// 4. Bybit futures
-				currentPrice, err = FetchBybitFuturesPrice(clients.BybitClient, symbol)
+				// 4. Bybit spot
+				currentPrice, err = FetchBybitSpotPrice(clients.BybitClient, symbol)
 				if err == nil {
 					sourceExchange = "Bybit"
-					sourceMarket = "futures"
+					sourceMarket = "spot"
 				} else {
-					return nil, fmt.Errorf("failed to get current price for %s from any source: %w", symbol, err)
+					logrus.WithError(err).WithField("symbol", symbol).Debug("Bybit spot price fetch failed, trying Bybit futures")
+
+					// 5. Bybit futures
+					currentPrice, err = FetchBybitFuturesPrice(clients.BybitClient, symbol)
+					if err == nil {
+						sourceExchange = "Bybit"
+						sourceMarket = "futures"
+					} else {
+						return nil, fmt.Errorf("failed to get current price for %s from any source: %w", symbol, err)
+					}
 				}
 			}
 		}
@@ -692,25 +825,17 @@ func FetchPriceInfo(clients *ExchangeClients, symbol string, preferredExchange, 
 		Source:       fmt.Sprintf("%s %s", sourceExchange, sourceMarket),
 	}
 
-	// Получаем исторические цены для разных периодов
 	now := time.Now()
 
-	// 15 минут назад
 	if price15m, err := FetchHistoricalPrice(clients, symbol, now.Add(-15*time.Minute), sourceExchange, sourceMarket); err == nil {
 		priceInfo.Change15m = calculateChangePercent(price15m, currentPrice)
 	}
-
-	// 1 час назад
 	if price1h, err := FetchHistoricalPrice(clients, symbol, now.Add(-1*time.Hour), sourceExchange, sourceMarket); err == nil {
 		priceInfo.Change1h = calculateChangePercent(price1h, currentPrice)
 	}
-
-	// 4 часа назад
 	if price4h, err := FetchHistoricalPrice(clients, symbol, now.Add(-4*time.Hour), sourceExchange, sourceMarket); err == nil {
 		priceInfo.Change4h = calculateChangePercent(price4h, currentPrice)
 	}
-
-	// 24 часа назад
 	if price24h, err := FetchHistoricalPrice(clients, symbol, now.Add(-24*time.Hour), sourceExchange, sourceMarket); err == nil {
 		priceInfo.Change24h = calculateChangePercent(price24h, currentPrice)
 	}
@@ -719,11 +844,27 @@ func FetchPriceInfo(clients *ExchangeClients, symbol string, preferredExchange, 
 }
 
 // FetchHistoricalPrice получает цену на определенный момент времени, проверяя биржи в порядке приоритета.
+// Важно: Variational не предоставляет исторических данных (свечей), поэтому для исторических цен
+// используются Bitget и Bybit.
 func FetchHistoricalPrice(clients *ExchangeClients, symbol string, timestamp time.Time, preferredExchange, preferredMarket string) (float64, error) {
 	var price float64
 	var err error
 
-	// Если есть предпочтительная биржа/рынок, сначала пробуем их
+	// Если есть предпочтительная биржа/рынок, сначала пробуем их.
+	// Variational не имеет исторического API, поэтому для него откатываемся на Bitget futures.
+	if preferredExchange == "Variational" {
+		price, err = fetchHistoricalPriceBitgetFutures(clients.BitgetClient, symbol, timestamp)
+		if err == nil {
+			return price, nil
+		}
+		logrus.WithError(err).WithField("symbol", symbol).Debug("Bitget futures historical (fallback for Variational) failed, trying Bybit linear")
+		price, err = FetchBybitHistoricalPrice(clients.BybitClient, symbol, timestamp, "linear")
+		if err == nil {
+			return price, nil
+		}
+		logrus.WithError(err).WithField("symbol", symbol).Debug("Bybit linear historical (fallback for Variational) failed")
+		// Продолжаем в общий fallback ниже
+	}
 	if preferredExchange == "Bitget" && preferredMarket == "spot" {
 		price, err = fetchHistoricalPriceBitgetSpot(clients.BitgetClient, symbol, timestamp)
 		if err == nil {
@@ -753,7 +894,7 @@ func FetchHistoricalPrice(clients *ExchangeClients, symbol string, timestamp tim
 		logrus.WithError(err).WithField("symbol", symbol).Debug("Bybit futures historical price failed, trying Bitget spot")
 	}
 
-	// Если предпочтительный вариант не сработал или его не было, пробуем по порядку:
+	// Общий fallback по порядку:
 
 	// 1. Bitget spot
 	price, err = fetchHistoricalPriceBitgetSpot(clients.BitgetClient, symbol, timestamp)
@@ -786,7 +927,8 @@ func FetchHistoricalPrice(clients *ExchangeClients, symbol string, timestamp tim
 	return 0, fmt.Errorf("failed to get historical price for %s from any source: %w", symbol, err)
 }
 
-// FetchCurrentPrice получает только текущую цену без исторических изменений (для мониторинга)
+// FetchCurrentPrice получает только текущую цену без исторических изменений (для мониторинга).
+// Порядок приоритета: Variational → Bitget → Bybit.
 func FetchCurrentPrice(clients *ExchangeClients, symbol string, preferredExchange, preferredMarket string) (*FetchPriceInfoResult, error) {
 	var currentPrice float64
 	var sourceExchange, sourceMarket string
@@ -800,6 +942,14 @@ func FetchCurrentPrice(clients *ExchangeClients, symbol string, preferredExchang
 		}).Debug("attempting to fetch price from preferred source")
 
 		switch preferredExchange {
+		case "Variational":
+			if preferredMarket == "futures" {
+				currentPrice, err = fetchVariationalPrice(clients.VariationalClient, symbol)
+				if err == nil {
+					sourceExchange = "Variational"
+					sourceMarket = "futures"
+				}
+			}
 		case "Bitget":
 			if preferredMarket == "spot" {
 				currentPrice, err = fetchBitgetSpotPriceOnly(clients.BitgetClient, symbol)
@@ -846,34 +996,47 @@ func FetchCurrentPrice(clients *ExchangeClients, symbol string, preferredExchang
 		}).Debug("failed to fetch price from preferred source, trying all sources")
 	}
 
-	// Если нет предпочтительной биржи/рынка или она не сработала, пробуем по порядку
-	currentPrice, err = fetchBitgetSpotPriceOnly(clients.BitgetClient, symbol)
+	// Fallback: пробуем все источники по порядку приоритета:
+	// 1. Variational futures
+	currentPrice, err = fetchVariationalPrice(clients.VariationalClient, symbol)
 	if err == nil {
-		sourceExchange = "Bitget"
-		sourceMarket = "spot"
+		sourceExchange = "Variational"
+		sourceMarket = "futures"
 	} else {
-		logrus.WithError(err).WithField("symbol", symbol).Debug("Bitget spot price fetch failed, trying Bitget futures")
+		logrus.WithError(err).WithField("symbol", symbol).Debug("Variational price fetch failed, trying Bitget spot")
 
-		currentPrice, err = fetchBitgetFuturesPrice(clients.BitgetClient, symbol)
+		// 2. Bitget spot
+		currentPrice, err = fetchBitgetSpotPriceOnly(clients.BitgetClient, symbol)
 		if err == nil {
 			sourceExchange = "Bitget"
-			sourceMarket = "futures"
+			sourceMarket = "spot"
 		} else {
-			logrus.WithError(err).WithField("symbol", symbol).Debug("Bitget futures price fetch failed, trying Bybit spot")
+			logrus.WithError(err).WithField("symbol", symbol).Debug("Bitget spot price fetch failed, trying Bitget futures")
 
-			currentPrice, err = FetchBybitSpotPrice(clients.BybitClient, symbol)
+			// 3. Bitget futures
+			currentPrice, err = fetchBitgetFuturesPrice(clients.BitgetClient, symbol)
 			if err == nil {
-				sourceExchange = "Bybit"
-				sourceMarket = "spot"
+				sourceExchange = "Bitget"
+				sourceMarket = "futures"
 			} else {
-				logrus.WithError(err).WithField("symbol", symbol).Debug("Bybit spot price fetch failed, trying Bybit futures")
+				logrus.WithError(err).WithField("symbol", symbol).Debug("Bitget futures price fetch failed, trying Bybit spot")
 
-				currentPrice, err = FetchBybitFuturesPrice(clients.BybitClient, symbol)
+				// 4. Bybit spot
+				currentPrice, err = FetchBybitSpotPrice(clients.BybitClient, symbol)
 				if err == nil {
 					sourceExchange = "Bybit"
-					sourceMarket = "futures"
+					sourceMarket = "spot"
 				} else {
-					return nil, fmt.Errorf("failed to get current price for %s from any source: %w", symbol, err)
+					logrus.WithError(err).WithField("symbol", symbol).Debug("Bybit spot price fetch failed, trying Bybit futures")
+
+					// 5. Bybit futures
+					currentPrice, err = FetchBybitFuturesPrice(clients.BybitClient, symbol)
+					if err == nil {
+						sourceExchange = "Bybit"
+						sourceMarket = "futures"
+					} else {
+						return nil, fmt.Errorf("failed to get current price for %s from any source: %w", symbol, err)
+					}
 				}
 			}
 		}
