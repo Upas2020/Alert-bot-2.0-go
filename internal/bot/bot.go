@@ -193,7 +193,8 @@ func (b *TelegramBot) handleUpdate(ctx context.Context, upd tgbotapi.Update) {
 
 func (b *TelegramBot) reply(chatID int64, text string) {
 	msg := tgbotapi.NewMessage(chatID, text)
-	msg.ParseMode = "Markdown" // Включаем поддержку Markdown для кликабельных ID
+	msg.ParseMode = "Markdown"          // Включаем поддержку Markdown для кликабельных ID
+	msg.AllowSendingWithoutReply = true // Добавляем для совместимости с Telegram API 7.0+
 	if _, err := b.api.Send(msg); err != nil {
 		logrus.WithError(err).Warn("send message failed")
 	} else {

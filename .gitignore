@@ -24,3 +24,4 @@ vendor/
 *.db-journal
 alerts.json.backup.*
 
+alerts_prod.session.sql

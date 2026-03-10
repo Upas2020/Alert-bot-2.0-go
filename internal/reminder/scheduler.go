@@ -62,7 +62,9 @@ func (s *Scheduler) fire(t Task) {
 	if t.Text != "" {
 		msg += fmt.Sprintf(", %s", t.Text)
 	}
-	s.api.Send(tgbotapi.NewMessage(t.ChatID, msg))
+	tgMsg := tgbotapi.NewMessage(t.ChatID, msg)
+	tgMsg.AllowSendingWithoutReply = true // Добавляем для совместимости с Telegram API 7.0+
+	s.api.Send(tgMsg)
 	DeleteReminder(s.db, t.ID)
 	s.mu.Lock()
 	delete(s.tasks, t.ID)
