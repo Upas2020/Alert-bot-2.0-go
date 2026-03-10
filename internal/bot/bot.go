@@ -16,6 +16,7 @@ import (
 
 	"example.com/alert-bot/internal/alerts"
 	"example.com/alert-bot/internal/config"
+	"example.com/alert-bot/internal/levels"
 	"example.com/alert-bot/internal/prices"
 	"example.com/alert-bot/internal/reminder"
 )
@@ -156,6 +157,8 @@ func (b *TelegramBot) handleUpdate(ctx context.Context, upd tgbotapi.Update) {
 		b.cmdRush(ctx, chatID, userID)
 	case strings.HasPrefix(text, "/remind"):
 		b.cmdRemind(ctx, chatID, userID, username, text)
+	case strings.HasPrefix(text, "/chart"):
+		b.cmdChart(ctx, chatID, text)
 	case strings.HasPrefix(text, "/limit"):
 		b.cmdCreateLimitOrder(ctx, chatID, userID, username, text)
 	case strings.HasPrefix(text, "/climit"):
@@ -172,6 +175,7 @@ func (b *TelegramBot) handleUpdate(ctx context.Context, upd tgbotapi.Update) {
 			"/clearallalerts - удалить все алерты\n"+
 			"/p TICKER - показать цену одного символа с изменениями\n"+
 			"/allp - показать цены всех токенов из алертов и коллов\n"+
+			"/chart TICKER [tf] - построить график с уровнями поддержки и сопротивления\n"+
 			"/ocall TICKER [long|short] [size] sl [sl PRICE] - открыть колл\n"+
 			"/ccall CALLID [size] - закрыть колл по ID\n"+
 			"/sl CALLID [price] - установить/обновить стоп-лосс для колла\n"+
@@ -2208,5 +2212,88 @@ func (b *TelegramBot) checkLimitOrders(symbol string, currentPrice float64) {
 		if msg != "" {
 			b.reply(order.ChatID, msg)
 		}
+	}
+}
+
+func (b *TelegramBot) cmdChart(ctx context.Context, chatID int64, text string) {
+	parts := strings.Fields(text)
+	if len(parts) < 2 {
+		b.reply(chatID, "Использование: /chart TICKER [tf]\nПример: /chart BTCUSDT 1D или /chart BTC 1D\nПо умолчанию таймфрейм: 1D")
+		return
+	}
+
+	symbol := strings.ToUpper(parts[1])
+	// Нормализуем символ - добавляем USDT если отсутствует
+	if !strings.Contains(symbol, "USDT") && !strings.Contains(symbol, "USDC") && !strings.Contains(symbol, "PERP") {
+		symbol = symbol + "USDT"
+	}
+	timeframe := "1D" // по умолчанию
+	if len(parts) >= 3 {
+		timeframe = strings.ToUpper(parts[2])
+	}
+
+	// Отправляем сообщение о начале обработки
+	b.reply(chatID, fmt.Sprintf("📊 Генерирую график для %s (%s)...", symbol, timeframe))
+
+	// Создаем клиент Bitget
+	bitgetClient := levels.NewBitgetClient("https://api.bitget.com")
+
+	// Конвертируем таймфрейм
+	granularity, err := levels.ParseTimeframe(timeframe)
+	if err != nil {
+		logrus.WithError(err).Warn("invalid timeframe, using default")
+		granularity = "1d"
+	}
+
+	// Получаем исторические данные
+	candles, err := bitgetClient.GetCandles(symbol, granularity, 200)
+	if err != nil {
+		b.reply(chatID, fmt.Sprintf("❌ Ошибка получения данных для %s: %s", symbol, err.Error()))
+		return
+	}
+
+	if len(candles) == 0 {
+		b.reply(chatID, fmt.Sprintf("❌ Нет данных для %s", symbol))
+		return
+	}
+
+	// Создаем калькулятор уровней
+	calculator := levels.NewCalculator(200, 3, 20.0) // lookback: 200, minTouches: 3, rangePercent: 20.0%
+
+	// Получаем текущую цену
+	currentPrice := candles[len(candles)-1].Close
+
+	// Рассчитываем уровни
+	calculatedLevels := calculator.CalculateLevels(candles, currentPrice)
+
+	// Создаем генератор графиков
+	chartGen := levels.NewBasicChartGenerator(800, 600)
+
+	// Генерируем текстовый анализ (более надежный способ)
+	textAnalysis := chartGen.GenerateTextChart(candles, calculatedLevels, symbol, timeframe)
+
+	// Отправляем текстовый анализ
+	b.reply(chatID, textAnalysis)
+
+	// Пробуем сгенерировать PNG график
+	chartData, err := chartGen.GenerateChart(candles, calculatedLevels, symbol, timeframe)
+	if err != nil {
+		logrus.WithError(err).Warn("failed to generate PNG chart, text only sent")
+		b.reply(chatID, "⚠️ Не удалось сгенерировать PNG график, отправлен текстовый анализ")
+		return
+	}
+
+	// Отправляем PNG график
+	photoBytes := tgbotapi.FileBytes{
+		Name:  fmt.Sprintf("%s_%s_chart.png", symbol, timeframe),
+		Bytes: chartData,
+	}
+
+	photo := tgbotapi.NewPhoto(chatID, photoBytes)
+	photo.Caption = fmt.Sprintf("📊 График %s - %s с уровнями поддержки и сопротивления", symbol, timeframe)
+
+	if _, err := b.api.Send(photo); err != nil {
+		logrus.WithError(err).Error("failed to send chart photo")
+		b.reply(chatID, "❌ Ошибка отправки графика")
 	}
 }
